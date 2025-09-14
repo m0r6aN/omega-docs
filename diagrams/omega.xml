@@ -1,0 +1,70 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36" version="28.0.4">
+  <diagram name="OMEGA Platform" id="0">
+    <mxGraphModel dx="1053" dy="490" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" background="#ffffff" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="user" value="User / Agent Client" style="ellipse;whiteSpace=wrap;html=1;strokeColor=#444444;fillColor=#ffffff;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="30" y="20" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="federation_core" value="Federation Core&#xa;(REST 9405 / WS 9408)" style="rounded=1;strokeColor=#5c2f90;fillColor=#dcd6f7;fontColor=#000000;whiteSpace=wrap;html=1" parent="1" vertex="1">
+          <mxGeometry x="600" y="30" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_registry" value="Agent Registry / MCP Registry&#xa;(Tools and Agent Cards)" style="rounded=1;strokeColor=#008f7a;fillColor=#d0f0ea;whiteSpace=wrap;html=1" parent="1" vertex="1">
+          <mxGeometry x="70" y="350" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="titans" value="Titan Agents Cluster&#xa;(Agent‑Agent Orchestration)" style="rounded=1;strokeColor=#f45c42;fillColor=#f8d7d7;whiteSpace=wrap;html=1" parent="1" vertex="1">
+          <mxGeometry x="70" y="180" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="tools" value="MCP Tool Servers&#xa;(e.g. code_analyzer, flight_tool etc.)" style="rounded=1;strokeColor=#0266C8;fillColor=#CCE5F8;whiteSpace=wrap;html=1" parent="1" vertex="1">
+          <mxGeometry x="570" y="350" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="edge1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#000000;" parent="1" source="user" target="federation_core" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="410" y="50" />
+              <mxPoint x="410" y="50" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#000000;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" target="titans" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="600" y="80" as="sourcePoint" />
+            <mxPoint x="170" y="170" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="170" y="80" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge3" style="edgeStyle=elbowEdgeStyle;html=1;endArrow=block;strokeColor=#000000;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="600" y="90" as="sourcePoint" />
+            <mxPoint x="270" y="410" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#000000;" parent="1" source="titans" target="tools" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#000000;" parent="1" source="tools" target="agent_registry" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;startArrow=block;strokeColor=#888888;dashed=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" parent="1" source="agent_registry" target="federation_core" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="550" y="390" />
+              <mxPoint x="550" y="170" />
+              <mxPoint x="640" y="170" />
+              <mxPoint x="640" y="110" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;startArrow=block;strokeColor=#000000;" parent="1" source="titans" target="agent_registry" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge8" style="edgeStyle=elbowEdgeStyle;html=1;startArrow=block;endArrow=block;strokeColor=#000000;" parent="1" source="federation_core" target="tools" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

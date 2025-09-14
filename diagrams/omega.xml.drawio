@@ -1,0 +1,124 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36" version="28.0.7">
+  <diagram name="OMEGA Platform Architecture" id="omega-pantheon-2024">
+    <mxGraphModel dx="1053" dy="490" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="infra" value="Infra" style="swimlane;fillColor=#e1eaff;strokeColor=#2a56c6;fontStyle=1;fontSize=16" parent="1" vertex="1">
+          <mxGeometry x="40" y="40" width="320" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="db" value="MongoDB" style="shape=database;fillColor=#f9f9f9;strokeColor=#4663ac;" parent="infra" vertex="1">
+          <mxGeometry x="170" y="50" width="100" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="redis" value="Redis" style="shape=cloud;fillColor=#f9f9f9;strokeColor=#e1493d;" parent="infra" vertex="1">
+          <mxGeometry x="170" y="160" width="100" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="platform" value="Platform" style="swimlane;fillColor=#e8ffe1;strokeColor=#22b573;fontStyle=1;fontSize=16" parent="1" vertex="1">
+          <mxGeometry x="400" y="40" width="800" height="470" as="geometry" />
+        </mxCell>
+        <mxCell id="registry" value="Agent Registry" style="shape=cloud;fillColor=#f9f9f9;strokeColor=#4d9f7c;" parent="platform" vertex="1">
+          <mxGeometry x="40" y="40" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="context" value="Context Server" style="shape=cloud;fillColor=#f9f9f9;strokeColor=#42aaff;" parent="platform" vertex="1">
+          <mxGeometry x="220" y="40" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="core" value="Federation Core" style="shape=server;fillColor=#f9f9f9;strokeColor=#225b99;" parent="platform" vertex="1">
+          <mxGeometry x="420" y="40" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="toolcache" value="ToolCache Agent" style="shape=cloud;fillColor=#f9f9f9;strokeColor=#9657a4;" parent="platform" vertex="1">
+          <mxGeometry x="40" y="130" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="llmtool" value="LLM Tool Server" style="shape=server;fillColor=#f9f9f9;strokeColor=#b37215;" parent="platform" vertex="1">
+          <mxGeometry x="220" y="370" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="workflow" value="Workflow Generator" style="shape=server;fillColor=#f9f9f9;strokeColor=#d87822;" parent="platform" vertex="1">
+          <mxGeometry x="410" y="280" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="tmpldisc" value="Template Discovery" style="shape=server;fillColor=#f9f9f9;strokeColor=#0c686f;" parent="platform" vertex="1">
+          <mxGeometry x="600" y="360" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ws" value="WebSocket Service" style="shape=cloud;fillColor=#f9f9f9;strokeColor=#0092b7;" parent="platform" vertex="1">
+          <mxGeometry x="40" y="300" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="agents" value="Agents &amp; Titans" style="swimlane;fillColor=#fff5e1;strokeColor=#b89236;fontStyle=1;fontSize=16" parent="1" vertex="1">
+          <mxGeometry x="1240" y="40" width="400" height="470" as="geometry" />
+        </mxCell>
+        <mxCell id="claude" value="Claude Titan" style="shape=server;fillColor=#f9f9f9;strokeColor=#7e5aad;" parent="agents" vertex="1">
+          <mxGeometry x="50" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="gpt" value="GPT Titan" style="shape=server;fillColor=#f9f9f9;strokeColor=#4186d1;" parent="agents" vertex="1">
+          <mxGeometry x="210" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="gemini" value="Gemini Titan" style="shape=server;fillColor=#f9f9f9;strokeColor=#28bfae;" parent="agents" vertex="1">
+          <mxGeometry x="50" y="130" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="grok" value="Grok Titan" style="shape=server;fillColor=#f9f9f9;strokeColor=#a53f2b;" parent="agents" vertex="1">
+          <mxGeometry x="210" y="130" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="regagent" value="Regular Agent" style="shape=server;fillColor=#f9f9f9;strokeColor=#668c40;" parent="agents" vertex="1">
+          <mxGeometry x="50" y="220" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="db_context" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#4663ac;" parent="1" source="db" target="context" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="context_toolcache" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#9657a4;" parent="1" source="context" target="toolcache" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="context_llmtool" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#b37215;exitX=0.31;exitY=0.8;exitDx=0;exitDy=0;exitPerimeter=0;" parent="1" source="context" target="llmtool" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="core_registry" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#4d9f7c;" parent="1" source="core" target="registry" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="core_context" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#42aaff;" parent="1" source="core" target="context" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="core_llmtool" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#b37215;" parent="1" source="core" target="llmtool" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="core_workflow" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#d87822;" parent="1" source="core" target="workflow" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="core_tmpldisc" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#0c686f;" parent="1" source="core" target="tmpldisc" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="toolcache_registry" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#4d9f7c;" parent="1" source="toolcache" target="registry" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="claude_core" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#7e5aad;" parent="1" source="claude" target="core" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="gpt_core" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#4186d1;" parent="1" source="gpt" target="core" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="gemini_core" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#28bfae;" parent="1" source="gemini" target="core" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="grok_core" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#a53f2b;" parent="1" source="grok" target="core" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="regagent_core" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#668c40;" parent="1" source="regagent" target="core" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ws_core" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#0092b7;" parent="1" source="ws" target="core" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ws_context" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#42aaff;" parent="1" source="ws" target="context" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ws_registry" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#4d9f7c;" parent="1" source="ws" target="registry" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="redis_context" style="edgeStyle=elbowEdgeStyle;endArrow=block;strokeColor=#e1493d;entryX=0.16;entryY=0.55;entryDx=0;entryDy=0;entryPerimeter=0;exitX=0.875;exitY=0.5;exitDx=0;exitDy=0;exitPerimeter=0;" parent="1" source="redis" target="context" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="310" y="260" as="sourcePoint" />
+            <mxPoint x="620" y="140" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="380" y="200" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

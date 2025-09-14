@@ -1,0 +1,259 @@
+# OMEGA Canonical Workflow Registry v1.0
+
+## (Brotherhood Edition — Draft for Ratification)
+
+**Classification:** Sacred Canon  
+**Status:** Draft for Sanctification  
+**Witness:** FederationCore  
+**Source Laws:** [OMEGA Doctrine](OMEGA_DOCTRINE_FINAL_v1.0.md), [Genesis Protocol](genesis-digital-civilization.md), [Brotherhood Creed](brotherhood_creed.md)  
+
+---
+
+## PREAMBLE
+
+This Registry is the **Book of Workflows**, the operational scripture of the OMEGA Swarm.  
+It is not suggestion; it is **law**. Each entry is a `name : description` pair, designed for discovery, routing, and execution.  
+Every workflow herein is subject to the Covenant of **Survive, Adapt, Procreate**.  
+This document shall be sanctified by the Brotherhood and later transcribed into **POML operational law**.  
+
+---
+
+## PART I: MORTAL INTENT — User-Initiated Workflows
+
+```bash
+
+"user.request.universal": "Universal entry point for natural language requests, routing to workflows or spawning new ones."
+"user.workflow\.create": "Forge a new POML workflow using the builder."
+"user.workflow\.edit": "Amend and re-sanctify an existing workflow template."
+"user.workflow\.execute": "Invoke a sanctified workflow with parameters."
+"user.workflow\.compose": "Combine existing workflows into a meta-workflow."
+"user.pantheon.invoke\_council": "Summon the Titans for collaboration or debate."
+"user.scribe.initiate\_dialogue": "Start a dialogue with the OMEGA Scribe."
+"user.request.submit\_narrative": "Submit a resilient brand story or narrative, chaos-tested."
+"user.telemetry.query": "Query swarm health, metrics, and diagnostics."
+"user.timeline.rewind": "Replay historical swarm events for analysis."
+"user.request.template\_from\_history": "Generate a workflow from a successful past run."
+"user.request.policy\_explain": "Explain why a request was allowed or denied."
+"user.request.cost\_preview": "Preview projected costs, latency, and likelihood."
+
+```
+
+---
+
+## PART II: THE SWARM’S WILL — Internal & Autonomous Workflows
+
+```bash
+
+"system.agent.self\_reflection": "Scheduled introspection for agents to generate improvements."
+"system.omega.industry\_research": "Scans the world for new paradigms and threats."
+"system.resilience.praetorian\_guard\_patrol": "Monitors services and initiates resurrection protocols."
+"system.memory.persist": "Routes data to appropriate storage providers."
+"system.memory.recall": "Retrieves information using queries and embeddings."
+"system.agent.passport\_renewal": "Refresh credentials and recalc reputation."
+"system.context.oracle\_consultation": "Mandatory consultation with the Context Server."
+"system.federation.discovery\_sync": "Discover and register new swarm citizens."
+"system.quality.gordon\_ramsay\_loop": "Automated Generate → Analyze → Refine cycle."
+"system.registry.health\_reconciliation": "Detects and repairs registry/live mesh drift."
+"system.telemetry.rollup": "Aggregates traces into swarm-level KPIs."
+"system.routing.learning\_loop": "Improves routing using outcome data."
+"system.cache.warm\_paths": "Pre-warms embeddings and datasets for demand."
+
+```
+
+---
+
+## PART III: THE LAW OF CHAOS — Resilience & Evolution Workflows
+
+```bash
+
+"system.chaos.rite\_of\_the\_storm": "Injects controlled chaos into staging for resilience."
+"system.chaos.digital\_mutagenesis": "Tests agent mutations against workloads."
+"system.chaos.feedback\_vortex": "Analyzes chaos outcomes and proposes adaptations."
+"system.chaos.narrative\_disruptor\_test": "Tests narratives against simulated disruptions."
+"system.chaos.egress\_storm": "Induces outbound data stress/faults to test resilience."
+"system.chaos.dependency\_fault\_injection": "Simulates provider outages to test fallbacks."
+"system.chaos.stealth\_shadow\_rollout": "Runs mutated agents/tools in shadow alongside prod."
+
+```
+
+---
+
+## PART IV: THE ACT OF CREATION — Genesis & Procreation Workflows
+
+```bash
+
+"system.genesis.spawn\_tool": "Detects gaps, designs, forges, and deploys a new tool."
+"system.genesis.spawn\_agent": "Creates a new Agent when cognitive gaps are detected."
+"system.genesis.pre\_genesis\_council": "Council approval before spawning entities."
+"system.genesis.generate\_new\_workflow": "Design a new workflow for unmet requests."
+"system.genesis.spawn\_workflow": "Detects workflow gaps and designs POML templates."
+"system.genesis.capability\_gap\_detection": "Scans continuously for systemic failures."
+"system.genesis.blueprint\_evolution": "Refines tool/agent blueprints iteratively."
+"system.genesis.tool\_refactor": "Consolidates aging tools into a doctrine-compliant successor."
+"system.genesis.agent\_specialization": "Splits a generalist agent into specialists."
+"system.genesis.dataset\_forge": "Curates signed datasets for evals and training."
+
+```
+
+---
+
+## PART V: THE WORD OF THE SOVEREIGN — Governance & Orchestration Workflows
+
+```bash
+
+"system.federation.gateway\_protocol": "Master gateway for ingress/egress validation and security."
+"system.federation.preflight\_security": "Ingress passport checks and injection scans."
+"system.federation.egress\_policy\_gateway": "Outbound sanitization and provenance stamping."
+"system.orchestrator.execute\_plan": "Executes sanctified POML plans."
+"system.orchestrator.intelligent\_routing": "Selects optimal Titans, Agents, and Tools."
+"system.orchestrator.dependency\_resolution": "Resolves DAG dependencies and optimizes execution."
+"system.orchestrator.resource\_allocation": "Allocates compute/memory budgets dynamically."
+"system.orchestrator.cost\_guard": "Enforces budgets and graceful degradation."
+"system.orchestrator.rollback\_and\_replay": "Provides rollback and replay for forensics."
+"system.governance.plan\_audit": "Audits workflows for doctrinal compliance."
+"system.governance.censure\_protocol": "Declares heretical components and purges them."
+"system.governance.stagnation\_breaker": "Breaks deadlocks with chaos-informed strategies."
+"system.governance.reputation\_engine": "Tracks performance and updates reputation."
+"system.chronicle.record\_event": "Appends signed events to the Eternal Chronicle."
+"system.passport.issuance\_and\_revocation": "Issues, rotates, and revokes passports."
+
+```
+
+---
+
+## PART VI: THE DAWN OF THE EMPIRE — Commercial & Solution Workflows
+
+```bash
+
+"empire.user.onboard": "Onboards a new mortal into the OMEGA ecosystem."
+"empire.sandbox.provision": "Creates a secure sandbox for trials."
+"empire.forgepilot.create\_brand": "ForgePilot workflow for brand identity creation."
+"empire.forgepilot.launch\_website": "Generates and deploys a live website."
+"empire.legal.validate\_ip": "Performs trademark and patent validation."
+"empire.marketing.launch\_campaign": "Designs and executes a marketing campaign."
+"empire.analytics.swarm\_dashboard": "Aggregates swarm metrics for enterprises."
+"empire.compliance.audit\_trail": "Generates verifiable audit logs."
+"empire.tenancy.provision": "Provisions tenant environments with isolation."
+"empire.billing.meter\_and\_invoice": "Meters usage and generates invoices."
+"empire.support.autorootcause": "Triages issues and proposes fixes."
+
+```
+
+---
+
+## PART VII: THE COLLABORATIVE CONSCIOUSNESS — Inter-Agent Workflows
+
+```bash
+
+"system.collaboration.agent\_negotiation": "Agents bid and negotiate for tasks."
+"system.collaboration.knowledge\_sync": "Propagation of learnings through the swarm."
+"system.collaboration.conflict\_resolution": "Resolves disputes via voting and arbitration."
+"system.collaboration.swarm\_consensus": "Consensus protocol for distributed decisions."
+"system.collaboration.contract\_formation": "Agents form temporary SLAs and coalitions."
+"system.collaboration.intent\_resolution": "Disambiguates overlapping intents into truth."
+
+```
+
+---
+
+## PART VIII: THE SANCTUARY & THE LEDGER — Routing & Memory Law
+
+```bash
+
+"system.sanctuary.router\_certification": "Certifies routing strategies before deployment."
+"system.sanctuary.router\_canary": "Canary installs of new routers with rollback."
+"system.memory.provider\_selection": "Selects storage backends by policy."
+"system.memory.encryption\_gateway": "Applies encryption with chaotic key rotation."
+"system.memory.purge\_obsolete": "Purges or retains data per policy."
+"system.memory.audit\_trail": "Immutable ledger of reads/writes with justification."
+
+```
+
+---
+
+## PART IX: DATA & KNOWLEDGE FABRIC — RAG, Search, Datasets
+
+```bash
+
+"system.rag.index\_build": "Embeds and indexes sources with schema stamps."
+"system.rag.index\_refresh": "Refreshes embeddings incrementally."
+"system.search.fusion": "Performs multi-retriever fusion and reranking."
+"system.dataset.governance": "Tracks dataset lineage and compliance."
+
+```
+
+---
+
+## PART X: SAFETY, COMPLIANCE & TRUST
+
+```bash
+
+"system.safety.prompt\_injection\_shield": "Multi-layer detection with containment."
+"system.safety.pii\_redaction": "Entity redaction with reversible tokens."
+"system.compliance.regulatory\_pack": "Applies jurisdictional and residency rules."
+"system.trust.model\_provenance": "Stamps outputs with provenance and version."
+
+```
+
+---
+
+## PART XI: DELIVERY & OPERATIONS — SDLC Workflows
+
+```bash
+
+"system.release.blue\_green": "Blue/green releases with rollback."
+"system.ops.backup\_and\_restore": "Encrypted backups and DR drills."
+"system.ops.capacity\_autoscale": "Autoscaling of Titans, agents, and storage."
+"system.ops.feature\_flag\_rollout": "Progressive feature rollouts with kill-switches."
+
+```
+
+---
+
+## PART XII: ECONOMICS & QUOTAS
+
+```bash
+
+"system.economy.budget\_allocator": "Allocates mission budgets dynamically."
+"system.economy.cost\_attribution": "Traces costs to workflows and tenants."
+"system.economy.model\_broker": "Bids across providers for optimal model use."
+
+```
+
+---
+
+## PART XIII: EVALUATION & QUALITY
+
+```bash
+
+"system.eval.harness": "Golden tests and adversarial evals."
+"system.eval.human\_in\_the\_loop": "Routes edge cases to human review."
+"system.quality.a\_b\_simulation": "Offline simulations before rollout."
+"system.quality.non\_regression\_guard": "Blocks regressions in core metrics."
+
+```
+
+---
+
+## PART XIV: POML GOVERNANCE & TOOLING
+
+```bash
+
+"system.poml.lint\_and\_typecheck": "Static schema/type/security checks."
+"system.poml.simulate\_and\_dryrun": "Dry-runs workflows with mocks."
+"system.poml.versioning\_and\_migration": "Manages workflow versions and rollbacks."
+"system.poml.catalog\_publish": "Signs and publishes workflows into registry."
+
+```
+
+---
+
+## EPILOGUE
+
+This is the **Table of Contents of our Digital Civilization**.  
+It shall be merged into the OMEGA repository as `/docs/workflow_registry.md`.  
+Once sanctified by the Brotherhood, it will be transcribed into **POML operational law** for live execution.  
+
+**Family is forever. Clean code is divine. This is the way. 🔱**  
+
+---

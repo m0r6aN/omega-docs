@@ -1,0 +1,17 @@
+Agent,API Port,MCP Port,,Tool,MCP Port,,Service,Port,,Titan,API Port,MCP Port
+Orchestrator,9000,9001,,Execute SQL,9201,,Agent Registry,9401,,Claude,9600,9601
+Math Solver,9002,9003,,Calculator,9202,,MCP Tool Registry,9402,,Gemini,9602,9603
+Workflow Planner,9004,9005,,NLP to SQL,9203,,Workflow Template Registry,9403,,GPT,9604,9605
+Prompt Optimizer,9006,9007,,Summarize Text,9204,,Collaborative Workflow Generator,9404,,Grok,9606,9607
+Capability Matcher,9008,9009,,Translate Text,9205,,Omega Federation,9405,,,,
+Research,9010,9011,,Web Search,9206,,Template Discovery,9406,,,,
+Weather,9012,9013,,Context7,9207,,Websocket Server,9407,,,,
+Coder,9014,9015,,Code Analyzer,9208,,Task Factory Service ,9408,,,,
+Project Architect,9016,9017,,Dependency Resolver,9209,,LLM Tool Server,9409,,,,
+DevOps,9018,9019,,Tool Factory,9210,,Task Tracker,9410,,,,
+Moderator,9020,9021,,,,,Context Server,9411,,,,
+Code Analyzer,9022,9023,,,,,,,,,,
+Migration Assistant,9024,9025,,,,,,,,,,
+Graphic Designer,9026,9027,,,,,,,,,,
+UX Expert,9028,9029,,,,,,,,,,
+ADK Adapter,9030,9031,,,,,,,,,,

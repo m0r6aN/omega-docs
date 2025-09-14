@@ -1,0 +1,202 @@
+# OMEGA Centralized Settings Pattern
+
+**Status:** Adopted
+**Owner:** omega-settings-service
+**Intent:** Single writer, many readers. Central authority, distributed cache, hot reload everywhere.
+
+---
+
+## Why this pattern
+
+* One place to mutate config safely
+* Fail fast on invalid or missing values
+* Zero‑restart hot reload across the swarm via Redis pub/sub
+* Keeps services autonomous at runtime while centralizing mutation
+
+---
+
+## Architecture (at a glance)
+
+```mermaid
+flowchart LR
+  subgraph Admin/Dev
+    A[Admin CLI / Postman]:::ops
+  end
+
+  subgraph Settings Service (Single Writer)
+    S1[.env<br/>OMEGASettings validation]:::svc
+    S2[Write snapshot → Redis key<br/>omega:config + version]:::svc
+    S3[Publish update → channel<br/>config_channel]:::svc
+    S1 --> S2 --> S3
+  end
+
+  subgraph Redis
+    R1[(omega:config)]:::redis
+    R2[(omega:config:version)]:::redis
+    RC[(pub/sub: config_channel)]:::redis
+  end
+
+  subgraph Consumers (Many Readers)
+    C1[Service/Agent X<br/>ConfigManager cache]:::srv
+    C2[Service/Agent Y<br/>ConfigManager cache]:::srv
+    C3[BaseAgent<br/>watch_log_level()]:::srv
+  end
+
+  A -->|POST /config/patch| S1
+  S2 --> R1
+  S2 --> R2
+  S3 --> RC
+  RC -->|hot reload| C1
+  RC -->|hot reload| C2
+  RC -->|hot reload| C3
+  R1 -->|get()| C1
+  R1 -->|get()| C2
+  R1 -->|get()| C3
+
+  classDef svc fill:#1f2937,stroke:#9ca3af,color:#e5e7eb,rx:8,ry:8
+  classDef srv fill:#0b3b2e,stroke:#8dd3bc,color:#eafff5,rx:8,ry:8
+  classDef ops fill:#3b0764,stroke:#c084fc,color:#f5f3ff,rx:8,ry:8
+  classDef redis fill:#7c2d12,stroke:#fca5a5,color:#fff7ed,rx:8,ry:8
+```
+
+---
+
+## Components
+
+* **Settings Service** (new)
+
+  * Reads canonical `.env`, validates via `OMEGASettings`, writes JSON snapshot to `omega:config`, bumps `omega:config:version`, publishes on `config_channel`.
+  * Exposes:
+
+    * `GET /config` — masked, validated view
+    * `POST /config/patch` — apply updates → revalidate → snapshot → publish
+    * `POST /config/reload` — republish current snapshot
+* **Redis**
+
+  * `omega:config` — full flattened settings snapshot
+  * `omega:config:version` — monotonically increasing version
+  * `config_channel` — pub/sub channel for cache bust + reload signal
+* **Consumers**
+
+  * `ConfigManager` reads from Redis with local cache and supports attribute access like `config.redis_url` with fail‑fast semantics and a hot‑reload listener.
+  * `AgentSettings` remains for static agent DNA, while live values move to `ConfigManager` for hot reload.
+  * Connection access uses your existing `ConnectionManager` and Redis pool.
+
+---
+
+## Data model (Redis)
+
+* **Key:** `omega:config` → JSON object of all validated fields
+* **Key:** `omega:config:version` → string/integer
+* **Channel:** `config_channel` → message payload should include at least:
+
+  ```json
+  { "event": "updated", "version": "1.2.0", "changed": ["LOG_LEVEL", "MONGO_URI"] }
+  ```
+
+---
+
+## Lifecycle
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Dev as Admin/Dev
+  participant SS as Settings Service
+  participant R as Redis
+  participant Svc as Consumer Service
+  participant CM as ConfigManager
+
+  Dev->>SS: POST /config/patch { updates:{...} }
+  SS->>SS: Apply to process env
+  SS->>SS: Rebuild OMEGASettings (validate)
+  SS->>R: SET omega:config = snapshot
+  SS->>R: INCR/SET omega:config:version
+  SS->>R: PUBLISH config_channel {event,version,changed}
+  Note over Svc: Hot-reload thread already subscribed
+  R-->>Svc: message on config_channel
+  Svc->>CM: clear cache; next get() pulls fresh
+  Svc->>Svc: reconfigure live toggles (e.g. LOG_LEVEL)
+```
+
+---
+
+## Consumer usage pattern
+
+1. **Require minimal contract** at startup
+
+```python
+cfg = create_config_manager()
+cfg.require([ConfigKey.REDIS_URL, ConfigKey.SECRET_KEY])  # plus service-specific keys
+```
+
+2. **Attribute access** everywhere
+
+```python
+redis_url = cfg.redis_url   # raises if missing
+timeout   = cfg.get("request_timeout", 30)  # tolerant read
+```
+
+3. **Hot reload hook** for log level
+
+```python
+from core.models.logging import watch_log_level
+watch_log_level()  # applies LOG_LEVEL now and on future updates
+```
+
+---
+
+## Security and governance
+
+* Single‑writer policy: only the Settings Service writes snapshots. Consumers never call `load_to_redis`.
+* AuthN for mutations: HMAC with `SECRET_KEY` or mTLS/JWT at gateway.
+* Mask secrets in `GET /config` responses by default.
+* Audit every patch: actor, timestamp, diff.
+
+---
+
+## Ops cookbook
+
+* **Read config**
+
+  ```bash
+  curl -s http://settings:9421/config | jq .
+  ```
+
+* **Patch values**
+
+  ```bash
+  curl -s -X POST http://settings:9421/config/patch \
+    -H "Authorization: Bearer <admin-token>" \
+    -H "Content-Type: application/json" \
+    -d '{"updates":{"LOG_LEVEL":"debug","MONGO_URI":"mongodb://mongo:27017"}}'
+  ```
+
+* **Re-publish current**
+
+  ```bash
+  curl -s -X POST http://settings:9421/config/reload \
+    -H "Authorization: Bearer <admin-token>"
+  ```
+
+---
+
+## Rollout checklist
+
+* [ ] Build and deploy `omega-settings-service` with canonical `.env`
+* [ ] Verify boot seeds `omega:config` and publishes update
+* [ ] Convert BaseAgent to `ConfigManager` + `watch_log_level()`
+* [ ] Add `cfg.require([...])` to each service with its minimal contract
+* [ ] Remove direct `.env` reliance from consumers where not strictly needed
+* [ ] Lock down mutation endpoints, enable audit logging
+* [ ] Add diff fields to pub/sub payload to target reactions
+
+---
+
+## Notes for contributors
+
+* Keep strict validation inside the Settings Service using `OMEGASettings` so invalid configs never broadcast.
+* Consumers should treat Redis as authoritative and read‑only.
+* Prefer attribute access on `ConfigManager` for fail‑fast ergonomics.
+
+---

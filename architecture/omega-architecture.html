@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>OMEGA Architecture — Bridge Interface</title>
+  <meta name="description" content="Interactive OMEGA architecture map with holographic bridge interface styling." />
+  <style>
+    :root{
+      --bg:#0b1020; --card:#111830; --muted:#a7b0c5; --accent:#7ee787; --accent2:#ffa657; --danger:#ff6b6b; --border:#1a2442; --focus:#99c1ff;
+      --user:#f0f8ff; --infra:#e6f2ff; --core:#fff0e6; --services:#f9f9e6; --agents:#e6ffe6; --exec:#fff5cc; --xcut:#eefaf0; --found:#f0fff0;
+      
+      /* Bridge/Holographic colors */
+      --holo-primary: rgba(0, 229, 255, 0.15);
+      --holo-secondary: rgba(138, 43, 226, 0.12);
+      --holo-accent: rgba(126, 231, 135, 0.18);
+      --holo-border: rgba(0, 255, 255, 0.3);
+      --holo-glow: rgba(0, 255, 255, 0.4);
+    }
+    
+    html,body{
+      height:100%;
+      margin:0;
+      background: 
+        radial-gradient(circle at 20% 30%, rgba(0, 255, 255, 0.08) 0%, transparent 50%),
+        radial-gradient(circle at 80% 70%, rgba(138, 43, 226, 0.06) 0%, transparent 50%),
+        radial-gradient(circle at 50% 10%, rgba(126, 231, 135, 0.04) 0%, transparent 60%),
+        linear-gradient(180deg,#0b1020 0%,#0c0f1a 100%);
+      color:#e8eefc;
+      font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial;
+      position: relative;
+    }
+    
+    /* Starfield background effect */
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: 
+        radial-gradient(2px 2px at 20px 30px, #fff, transparent),
+        radial-gradient(2px 2px at 40px 70px, rgba(255,255,255,0.8), transparent),
+        radial-gradient(1px 1px at 90px 40px, #fff, transparent),
+        radial-gradient(1px 1px at 130px 80px, rgba(255,255,255,0.6), transparent),
+        radial-gradient(2px 2px at 160px 30px, rgba(255,255,255,0.9), transparent);
+      background-repeat: repeat;
+      background-size: 200px 150px;
+      animation: starfield 60s linear infinite;
+      opacity: 0.4;
+      pointer-events: none;
+      z-index: -1;
+    }
+    
+    @keyframes starfield {
+      0% { transform: translateY(0); }
+      100% { transform: translateY(-150px); }
+    }
+    
+    .wrap{
+      display:grid;
+      grid-template-columns:380px 1fr;
+      grid-template-rows:auto 1fr;
+      grid-template-areas:"sidebar header" "sidebar main";
+      height:100%;
+      gap:15px;
+      padding:15px;
+      box-sizing:border-box;
+      transition:grid-template-columns .3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .wrap.collapsed{grid-template-columns:0 1fr}
+    
+    /* Holographic Header */
+    header{
+      grid-area:header;
+      background: linear-gradient(135deg, var(--holo-primary), var(--holo-secondary));
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--holo-border);
+      border-radius:16px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:12px 18px;
+      box-shadow: 
+        0 8px 32px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 0 20px rgba(0, 255, 255, 0.1);
+      position: relative;
+    }
+    
+    header::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: linear-gradient(45deg, transparent, rgba(255, 255, 255, 0.03), transparent);
+      border-radius: 16px;
+      pointer-events: none;
+    }
+    
+    .brand{
+      display:flex;
+      gap:12px;
+      align-items:center;
+      font-weight:700;
+      letter-spacing:.5px;
+      z-index: 1;
+    }
+    
+    .brand .dot{
+      width:12px;
+      height:12px;
+      border-radius:50%;
+      background: radial-gradient(circle, #00FFFF, #00E5FF);
+      box-shadow:0 0 20px var(--accent), 0 0 40px rgba(0, 255, 255, 0.5);
+      animation:pulse 2.5s infinite ease-in-out;
+    }
+    
+    @keyframes pulse{
+      0%,100%{transform:scale(1);opacity:1}
+      50%{transform:scale(1.4);opacity:.8;box-shadow:0 0 25px var(--accent), 0 0 50px rgba(0, 255, 255, 0.8)}
+    }
+    
+    .controls{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      z-index: 1;
+    }
+    
+    /* Holographic Buttons */
+    .icon-btn{
+      padding:8px 12px;
+      background: linear-gradient(145deg, rgba(0, 255, 255, 0.1), rgba(138, 43, 226, 0.08));
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(0, 255, 255, 0.3);
+      border-radius:10px;
+      color:#dbe6ff;
+      cursor:pointer;
+      font-weight:600;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+      overflow: hidden;
+    }
+    
+    .icon-btn::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+      transition: left 0.5s;
+    }
+    
+    .icon-btn:hover::before {
+      left: 100%;
+    }
+    
+    .icon-btn:hover {
+      background: linear-gradient(145deg, rgba(0, 255, 255, 0.2), rgba(138, 43, 226, 0.15));
+      border-color: rgba(0, 255, 255, 0.6);
+      box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+      transform: translateY(-1px);
+    }
+    
+    .icon-btn:active {
+      transform: translateY(0);
+      box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+    }
+    
+    .icon-btn:focus-visible{
+      outline:2px solid var(--focus);
+      outline-offset:2px;
+    }
+    
+    /* Holographic Search */
+    .search{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      background: linear-gradient(135deg, rgba(0, 255, 255, 0.08), rgba(138, 43, 226, 0.06));
+      backdrop-filter: blur(15px);
+      border: 1px solid rgba(0, 255, 255, 0.25);
+      border-radius:12px;
+      padding:6px 12px;
+      transition: all 0.3s ease;
+    }
+    
+    .search:focus-within {
+      border-color: rgba(0, 255, 255, 0.5);
+      box-shadow: 0 0 15px rgba(0, 255, 255, 0.2);
+    }
+    
+    .search input{
+      background:transparent;
+      border:none;
+      color:#e8eefc;
+      outline:none;
+      width:220px;
+      font-size: 14px;
+    }
+    
+    .search input::placeholder {
+      color: rgba(232, 238, 252, 0.6);
+    }
+    
+    /* Holographic Sidebar */
+    aside{
+      grid-area:sidebar;
+      background: linear-gradient(135deg, var(--holo-primary), var(--holo-secondary));
+      backdrop-filter: blur(25px);
+      -webkit-backdrop-filter: blur(25px);
+      border: 1px solid var(--holo-border);
+      border-radius:16px;
+      padding:16px;
+      overflow:auto;
+      box-shadow: 
+        0 8px 32px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 0 20px rgba(0, 255, 255, 0.08);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+    }
+    
+    aside::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: 
+        linear-gradient(45deg, transparent 30%, rgba(255, 255, 255, 0.02) 50%, transparent 70%),
+        radial-gradient(circle at 20% 20%, rgba(0, 255, 255, 0.05), transparent 40%),
+        radial-gradient(circle at 80% 80%, rgba(138, 43, 226, 0.05), transparent 40%);
+      border-radius: 16px;
+      pointer-events: none;
+    }
+    
+    .wrap.collapsed aside{
+      opacity: 0;
+      transform: translateX(-20px);
+      pointer-events: none;
+    }
+    
+    /* Holographic Main Area */
+    main{
+      grid-area:main;
+      background: linear-gradient(135deg, rgba(0, 255, 255, 0.05), rgba(138, 43, 226, 0.03));
+      backdrop-filter: blur(15px);
+      border: 1px solid rgba(0, 255, 255, 0.2);
+      border-radius:16px;
+      overflow:hidden;
+      position:relative;
+      box-shadow: 
+        0 8px 32px rgba(0, 0, 0, 0.25),
+        inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      min-height:0;
+    }
+    
+    #cy{width:100%;height:100%}
+
+    /* Holographic Node Overview */
+    .overview{
+      background: linear-gradient(135deg, rgba(0, 255, 255, 0.12), rgba(126, 231, 135, 0.08));
+      backdrop-filter: blur(15px);
+      border: 1px solid rgba(0, 255, 255, 0.25);
+      border-radius:14px;
+      padding:16px;
+      margin-bottom:12px;
+      box-shadow: 
+        0 4px 16px rgba(0, 0, 0, 0.2),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      position: relative;
+    }
+    
+    .overview::before {
+      content: '';
+      position: absolute;
+      top: 1px;
+      left: 1px;
+      right: 1px;
+      height: 30%;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent);
+      border-radius: 13px 13px 0 0;
+      pointer-events: none;
+    }
+    
+    .h1{font-size:18px;font-weight:800;margin:0 0 8px;letter-spacing:.3px;position:relative;z-index:1}
+    .subtitle{font-size:13px;color:#bcd0ff;margin:0 0 10px;position:relative;z-index:1}
+    .badge{
+      font-size:11px;
+      padding:3px 8px;
+      background: linear-gradient(45deg, rgba(0, 255, 255, 0.2), rgba(138, 43, 226, 0.15));
+      border: 1px solid rgba(0, 255, 255, 0.4);
+      border-radius:999px;
+      color:#b9c9ff;
+      margin-left:8px;
+      backdrop-filter: blur(10px);
+    }
+    .section-title{font-size:12px;color:#9fb1e6;margin:12px 0 8px;text-transform:uppercase;letter-spacing:.5px;position:relative;z-index:1}
+    .purpose{font-size:13px;color:#d9e4ff;line-height:1.4;position:relative;z-index:1}
+    .desc{font-size:12px;color:#a7b0c5;line-height:1.45;position:relative;z-index:1}
+    .link-row{margin-top:10px;position:relative;z-index:1}
+    .link-row a{color:var(--accent);text-decoration:none;transition:all 0.3s ease}
+    .link-row a:hover{color:#7ee787;text-shadow: 0 0 8px rgba(126, 231, 135, 0.5)}
+
+    /* Holographic Collapsible panels */
+    details.panel{
+      background: linear-gradient(135deg, rgba(0, 255, 255, 0.08), rgba(138, 43, 226, 0.06));
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(0, 255, 255, 0.2);
+      border-radius:12px;
+      margin-top:12px;
+      overflow: hidden;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    
+    details.panel[open]{
+      box-shadow: 
+        0 4px 20px rgba(0, 0, 0, 0.15),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      border-color: rgba(0, 255, 255, 0.3);
+    }
+    
+    details.panel > summary{
+      cursor:pointer;
+      list-style:none;
+      padding:12px 16px;
+      font-weight:700;
+      background: linear-gradient(90deg, rgba(255, 255, 255, 0.02), transparent);
+      transition: all 0.3s ease;
+      position: relative;
+    }
+    
+    details.panel > summary::marker{display:none}
+    
+    details.panel > summary:hover {
+      background: linear-gradient(90deg, rgba(0, 255, 255, 0.08), rgba(138, 43, 226, 0.05));
+    }
+    
+    details.panel > .content{
+      padding:10px 16px 16px;
+      border-top:1px solid rgba(0, 255, 255, 0.15);
+      background: rgba(0, 0, 0, 0.1);
+    }
+    
+    .toggles label{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      margin:8px 0;
+      font-size:13px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      padding: 4px;
+      border-radius: 6px;
+    }
+    
+    .toggles label:hover {
+      background: rgba(0, 255, 255, 0.05);
+    }
+    
+    .toggles input{
+      accent-color:#00FFFF;
+      transform: scale(1.1);
+    }
+
+    /* Flowing text effect for brand/title */
+    .flow-text{
+      background: linear-gradient(45deg, #00E5FF, #00FFA3, #8A2BE2, #FF6B6B);
+      background-size: 400% 400%;
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      animation: flowGradient 12s ease infinite;
+      text-shadow: 0 0 30px rgba(0, 255, 255, 0.3);
+    }
+    
+    @keyframes flowGradient{
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 768px) {
+      .wrap {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto 1fr;
+        grid-template-areas: "header" "sidebar" "main";
+      }
+      .wrap.collapsed {
+        grid-template-areas: "header" "main";
+      }
+      .wrap.collapsed aside {
+        display: none;
+      }
+    }
+  </style>
+
+  <!-- Cytoscape core -->
+  <script src="https://unpkg.com/cytoscape@3.33.1/dist/cytoscape.min.js"></script>
+  <!-- SVD provider (required by fcose spectral step) -->
+  <script src="https://cdn.jsdelivr.net/npm/numeric@1.2.6/numeric.min.js"></script>
+  <!-- fCoSE deps in order -->
+  <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
+  <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
+  <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
+  <!-- Export to SVG -->
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape-svg@3.6.1/cytoscape-svg.min.js"></script>
+  <script>try{ if (window.cytoscape && window.cytoscapeSvg) { cytoscape.use(cytoscapeSvg); } }catch(e){ console.warn("cytoscape-svg registration failed", e); }</script>
+</head>
+<body>
+  <div class="wrap" id="wrap">
+    <aside>
+      <!-- Node Overview -->
+      <section class="overview" id="overview">
+        <div class="h1 flow-text" id="ovTitle">Select a node</div>
+        <div class="subtitle">Group: <span id="ovGroup">—</span><span class="badge" id="ovBadge">—</span></div>
+        <div class="section-title">Purpose</div>
+        <div class="purpose" id="ovPurpose">Click a node to see what it does inside the federation.</div>
+        <div class="section-title">Description</div>
+        <div class="desc" id="ovDesc">We'll load a concise description and connect it to related components.</div>
+        <div class="link-row"><a id="ovLink" href="#" target="_blank" rel="noopener" style="display:none">Open docs ↗</a></div>
+      </section>
+
+      <!-- Show/Hide Groups -->
+      <details class="panel" open>
+        <summary>Show · Hide Groups</summary>
+        <div class="content toggles">
+          <label><input type="checkbox" data-group="UserDev" checked /> User / Developer</label>
+          <label><input type="checkbox" data-group="CoreInfrastructure" checked /> Core Infrastructure</label>
+          <label><input type="checkbox" data-group="OMEGACore" checked /> Federation Core</label>
+          <label><input type="checkbox" data-group="CoreServices" checked /> Core Services</label>
+          <label><input type="checkbox" data-group="CoreAgents" checked /> Core Agents</label>
+          <label><input type="checkbox" data-group="ExecutionLayer" checked /> Execution Layer</label>
+          <label><input type="checkbox" data-group="CrossCutting" checked /> Cross-Cutting</label>
+          <label><input type="checkbox" data-group="Foundational" checked /> Foundational</label>
+        </div>
+      </details>
+
+      <!-- Edge Types -->
+      <details class="panel" open>
+        <summary>Edge Types</summary>
+        <div class="content toggles">
+          <label><input type="checkbox" data-edge="flow" checked /> Flow</label>
+          <label><input type="checkbox" data-edge="data" checked /> Data</label>
+          <label><input type="checkbox" data-edge="svc" checked /> Service</label>
+          <label><input type="checkbox" data-edge="found" checked /> Foundational</label>
+          <label><input type="checkbox" data-edge="xcut" checked /> Cross-Cutting</label>
+        </div>
+      </details>
+    </aside>
+
+    <header>
+      <div class="brand">
+        <button class="icon-btn" id="toggleSidebarBtn" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
+        <div class="dot" aria-hidden="true"></div>
+        <div class="flow-text">OMEGA Core</div>
+      </div>
+      <div class="controls">
+        <div class="search" role="search">
+          <span aria-hidden="true">🔎</span>
+          <input id="searchInput" type="text" placeholder="Search nodes… (press /)" aria-label="Search nodes" />
+        </div>
+        <button class="icon-btn" id="zoomOutBtn" title="Zoom out ( - )" aria-label="Zoom out">➖</button>
+        <button class="icon-btn" id="zoomInBtn" title="Zoom in ( + )" aria-label="Zoom in">➕</button>
+        <button class="icon-btn" id="fitBtn" title="Fit to screen" aria-label="Fit to screen">🗺️</button>
+        <button class="icon-btn" id="resetBtn" title="Reset view" aria-label="Reset view">🔄</button>
+        <button class="icon-btn" id="pngBtn" title="Export PNG" aria-label="Export PNG">⬇️ PNG</button>
+        <button class="icon-btn" id="svgBtn" title="Export SVG" aria-label="Export SVG">⬇️ SVG</button>
+        <button class="icon-btn" id="shareBtn" title="Share state URL" aria-label="Share URL">🔗 Share</button>
+      </div>
+    </header>
+
+    <main>
+      <div id="cy" role="application" aria-label="Interactive architecture graph"></div>
+    </main>
+  </div>
+
+  <script>
+    // Build graph elements -----------------------------------------------------
+    const groups = {
+      UserDev: { label: "User / Developer", color: "var(--user)" },
+      CoreInfrastructure: { label: "Core Infrastructure", color: "var(--infra)" },
+      OMEGACore: { label: "OMEGA Federation Core", color: "var(--core)" },
+      CoreServices: { label: "Core Services", color: "var(--services)" },
+      CoreAgents: { label: "Core Agents", color: "var(--agents)" },
+      ExecutionLayer: { label: "Execution Layer", color: "var(--exec)" },
+      CrossCutting: { label: "Cross-Cutting", color: "var(--xcut)" },
+      Foundational: { label: "Foundational", color: "var(--found)" },
+    };
+
+    const parents = Object.keys(groups).map(id => ({ data: { id, label: groups[id].label, type: "group" }, classes: id }));
+
+    const nodes = [
+      { id: "User", parent: "UserDev", label: "User/Client (UI or API)" },
+      // Core Infrastructure
+      { id: "SettingsSvc", parent: "CoreInfrastructure", label: "⚙️ Settings Service" },
+      { id: "Redis", parent: "CoreInfrastructure", label: "🧠 Redis (Config Cache)" },
+      { id: "MongoDB", parent: "CoreInfrastructure", label: "🗄️ MongoDB (Data Store)" },
+      { id: "Chronicle", parent: "CoreInfrastructure", label: "📜 Chronicle (Event Ledger)" },
+      { id: "Observability", parent: "CoreInfrastructure", label: "📊 Prometheus / OTEL" },
+      // OMEGA Federation Core
+      { id: "FedGateway", parent: "OMEGACore", label: "🌐 Federation Gateway (single ingress/egress)" },
+      { id: "MCPInterface", parent: "OMEGACore", label: "🔌 MCP Interface" },
+      { id: "FedBrain", parent: "OMEGACore", label: "🧠 Federation Brain" },
+      // Core Services
+      { id: "AgentRegistry", parent: "CoreServices", label: "📇 Agent Registry" },
+      { id: "MCPRegistry", parent: "CoreServices", label: "📘 MCP Registry" },
+      { id: "ContextServer", parent: "CoreServices", label: "🧭 Context Server" },
+      { id: "HealthManager", parent: "CoreServices", label: "🩺 Health Manager" },
+      // Core Agents
+      { id: "Orchestrator", parent: "CoreAgents", label: "🎯 Orchestrator" },
+      { id: "PraetorianGuard", parent: "CoreAgents", label: "🛡️ Praetorian Guard" },
+      { id: "WorkflowPlanner", parent: "CoreAgents", label: "🧩 Workflow Planner" },
+      { id: "CapabilityMatcher", parent: "CoreAgents", label: "🔍 Capability Matcher" },
+      { id: "PromptOptimizer", parent: "CoreAgents", label: "🧠 Prompt Optimizer" },
+      { id: "ToolGenesis", parent: "CoreAgents", label: "🛠️ Tool Genesis" },
+      // Execution
+      { id: "Titans", parent: "ExecutionLayer", label: "🦾 Titans & Specialized Agents" },
+      // Cross-Cutting
+      { id: "POMLMgr", parent: "CrossCutting", label: "📜 POML Template Registry (PromptMixin)" },
+      { id: "HotReload", parent: "CrossCutting", label: "♻️ Hot Reload Config" },
+      { id: "DynModal", parent: "CrossCutting", label: "🎚️ Dynamic Modality Router" },
+      { id: "NeuralLearn", parent: "CrossCutting", label: "🧠 Neural Learning" },
+      { id: "Telemetry", parent: "CrossCutting", label: "📈 Telemetry Bus & Mixins" },
+      // Foundational
+      { id: "AllComponents", parent: "Foundational", label: "All Agents & Services" },
+    ].map(n => ({ data: n, classes: n.parent }));
+
+    const edges = [
+      // Main flow
+      ["User","FedGateway","API Calls / WS","flow"],
+      ["FedGateway","FedBrain","","flow"],
+      ["FedGateway","MCPInterface","Mounts","flow"],
+      ["FedBrain","Orchestrator","Delegates","flow"],
+      ["Orchestrator","WorkflowPlanner","1. Get Plan","flow"],
+      ["WorkflowPlanner","Orchestrator","2. Plan","flow"],
+      ["Orchestrator","CapabilityMatcher","3. Find Agent","flow"],
+      ["CapabilityMatcher","AgentRegistry","Queries","flow"],
+      ["Orchestrator","PromptOptimizer","4. Optimize Prompt","flow"],
+      ["Orchestrator","Titans","5. Dispatch","flow"],
+      // Foundational deps
+      ["AllComponents","Redis","Config via","found"],
+      ["AllComponents","Chronicle","Events to","found"],
+      ["AllComponents","Telemetry","Metrics/Traces","found"],
+      ["SettingsSvc","Redis","Publishes Config","found"],
+      // Key interactions
+      ["PraetorianGuard","HealthManager","Monitors","svc"],
+      ["PraetorianGuard","Titans","Remediates","svc"],
+      ["ToolGenesis","MCPRegistry","Creates Tools in","svc"],
+      ["FedGateway","AgentRegistry","Uses","svc"],
+      ["FedGateway","ContextServer","Uses","svc"],
+      // Datastores
+      ["AgentRegistry","MongoDB","DB","data"],
+      ["MCPRegistry","MongoDB","DB","data"],
+      ["Chronicle","MongoDB","DB","data"],
+      // Cross-cutting wiring
+      ["PromptOptimizer","POMLMgr","","xcut"],
+      ["Orchestrator","POMLMgr","","xcut"],
+      ["POMLMgr","FedGateway","Manifest (best-effort)","xcut"],
+      ["AllComponents","HotReload","subscribe","xcut"],
+      ["HotReload","Redis","","xcut"],
+      ["Redis","HotReload","","xcut"],
+      ["HotReload","AllComponents","reload_if_changed()","xcut"],
+      ["HotReload","Observability","metrics","xcut"],
+      ["Orchestrator","DynModal","","xcut"],
+      ["Titans","DynModal","","xcut"],
+      ["Titans","DynModal","exec metrics","xcut"],
+      ["Titans","NeuralLearn","outcomes","xcut"],
+      ["NeuralLearn","Orchestrator","mission insights","xcut"],
+      ["Telemetry","Observability","","xcut"],
+      ["Telemetry","Chronicle","optional state/events","xcut"],
+    ].map(([s,t,label,cls]) => ({ data: { id: s+"__"+t+"__"+label+"__"+cls, source: s, target: t, label }, classes: cls }));
+
+    const elements = [ ...parents, ...nodes, ...edges ];
+
+    // Styles ------------------------------------------------------------------
+    const style = [
+      // Base nodes
+      { selector: 'node', style: {
+        'background-color': '#2b6cb0',
+        'label': 'data(label)',
+        'color': '#e8eefc',
+        'font-size': 11,
+        'text-wrap': 'wrap',
+        'text-max-width': 160,
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'border-width': 1,
+        'border-color': '#1a2442',
+        'width': 'label',
+        'height': 'label',
+        'padding': '8px',
+        'shape': 'round-rectangle'
+      } },
+      // Groups (compound parents)
+      { selector: '$node > node', style: {
+        'shape': 'round-rectangle',
+        'background-color': '#0e1630',
+        'border-color': '#263a6b',
+        'border-width': 2,
+        'padding': '12px',
+        'text-valign': 'top',
+        'text-halign': 'center',
+        'font-weight': 'bold',
+        'font-size': 12
+      } },
+      // Group-specific colors via classes
+      { selector: '.UserDev',            style: { 'background-color': 'var(--user)' } },
+      { selector: '.CoreInfrastructure', style: { 'background-color': 'var(--infra)' } },
+      { selector: '.OMEGACore',          style: { 'background-color': 'var(--core)' } },
+      { selector: '.CoreServices',       style: { 'background-color': 'var(--services)' } },
+      { selector: '.CoreAgents',         style: { 'background-color': 'var(--agents)' } },
+      { selector: '.ExecutionLayer',     style: { 'background-color': 'var(--exec)' } },
+      { selector: '.CrossCutting',       style: { 'background-color': 'var(--xcut)' } },
+      { selector: '.Foundational',       style: { 'background-color': 'var(--found)' } },
+      // Edges
+      { selector: 'edge', style: {
+        'curve-style': 'bezier',
+        'control-point-distance': 20,
+        'control-point-weight': 0.2,
+        'line-color': '#6c86c6',
+        'target-arrow-color': '#6c86c6',
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 1,
+        'width': 2,
+        'label': 'data(label)',
+        'font-size': 9,
+        'text-background-color': '#0b1020',
+        'text-background-opacity': 0.6,
+        'text-background-padding': 2,
+        'text-rotation': 'autorotate'
+      } },
+      { selector: 'edge.flow',  style: { 'line-color': '#7ee787', 'target-arrow-color': '#7ee787' } },
+      { selector: 'edge.data',  style: { 'line-style': 'dashed', 'line-color': '#ffcf6d', 'target-arrow-color': '#ffcf6d' } },
+      { selector: 'edge.svc',   style: { 'line-color': '#9aa9ff', 'target-arrow-color': '#9aa9ff' } },
+      { selector: 'edge.found', style: { 'line-color': '#6bd6b3', 'target-arrow-color': '#6bd6b3', 'line-style': 'dotted' } },
+      { selector: 'edge.xcut',  style: { 'line-style': 'dashed', 'line-color': '#e48fff', 'target-arrow-color': '#e48fff' } },
+      // Interaction states
+      { selector: '.highlight', style: { 'border-color': '#7ee787', 'border-width': 3, 'box-shadow': '0 0 12px #7ee787' } },
+      { selector: '.faded',     style: { 'opacity': 0.15 } },
+      { selector: '.hide',      style: { 'display': 'none' } },
+    ];
+
+    // Init Cytoscape ----------------------------------------------------------
+    const cy = cytoscape({
+      container: document.getElementById('cy'),
+      elements,
+      style,
+      layout: {
+        name: 'fcose',
+        quality: "default",
+        randomize: true,
+        animate: true,
+        nodeDimensionsIncludeLabels: true,
+        idealEdgeLength: 160,
+        nodeSeparation: 70,
+        nodeRepulsion: 5500,
+        padding: 50
+      },
+      wheelSensitivity: 0.2,
+      pixelRatio: 1.0
+    });
+
+    // Node info dictionary ----------------------------------------------------
+    const nodeInfo = {
+      User:         { purpose: "External entry point to the federation.", desc: "Human or client system calling through the gateway API (HTTP/WS)." },
+      FedGateway:   { purpose: "Single ingress/egress for the federation.", desc: "Terminates client sessions, mounts MCP servers, normalizes auth, and forwards to Federation Brain or core services." },
+      MCPInterface: { purpose: "Bridge to MCP ecosystem.", desc: "Mounts MCP servers and exposes tools/resources to the federation routing layer." },
+      FedBrain:     { purpose: "High-level delegation and policy brain.", desc: "Evaluates intent, selects orchestration patterns, and hands off to Orchestrator." },
+      Orchestrator: { purpose: "Central coordinator for complex tasks.", desc: "Runs planners/matchers/optimizers, manages multi-step workflows, and dispatches execution to Titans." },
+      WorkflowPlanner: { purpose: "Decomposes tasks into steps.", desc: "Plans actions, dependencies, and required capabilities for the Orchestrator." },
+      CapabilityMatcher: { purpose: "Finds the right agent/tool.", desc: "Queries registries and chooses best-fit capabilities for the job." },
+      PromptOptimizer: { purpose: "Improves prompts & context.", desc: "Uses POML templates and heuristics to construct optimal prompts per target agent." },
+      Titans:      { purpose: "Specialized execution units.", desc: "LLMs/tools that perform concrete work; emit metrics and learning signals." },
+      PraetorianGuard: { purpose: "Runtime safety and remediation.", desc: "Monitors health/guardrails; can short-circuit or fail over to healthy agents." },
+      AgentRegistry: { purpose: "Catalog of agents and skills.", desc: "Backed by MongoDB; used by matchers and gateway routing." },
+      MCPRegistry:   { purpose: "Catalog of MCP tools/servers.", desc: "ToolGenesis registers new tools here; used for capability discovery." },
+      ContextServer: { purpose: "Long-term context and memory.", desc: "Provides retrieval/context stitching for workflows." },
+      HealthManager: { purpose: "Fleet health and SLOs.", desc: "Aggregates checks, exposes signals for Praetorian remediation." },
+      SettingsSvc: { purpose: "Source of truth for config.", desc: "Publishes to Redis; all components subscribe via Hot Reload channel." },
+      Redis:       { purpose: "Fast config/event cache.", desc: "Carries hot-reload channels; shared low-latency persistence." },
+      MongoDB:     { purpose: "Primary operational store.", desc: "Holds registries and ledger backends." },
+      Chronicle:   { purpose: "Event ledger.", desc: "Immutable-ish audit/event timeline, optionally receives telemetry echoes." },
+      Observability: { purpose: "Metrics and tracing pipeline.", desc: "Prometheus + OTEL collector ingest; dashboards/alerts downstream." },
+      POMLMgr:     { purpose: "Template registry for prompts.", desc: "Validates and renders POML, with per-agent variants and optional federation manifest." },
+      HotReload:   { purpose: "Safe, observable config updates.", desc: "Debounce/cooldown/timeout, metrics, and targeted reload of subscribers via Redis." },
+      DynModal:    { purpose: "Modality routing.", desc: "EWMA-based selection across text/image/tool/streaming paths; records execution telemetry." },
+      NeuralLearn: { purpose: "Federated learning loop.", desc: "Encrypts and stores task outcomes; yields mission insights to Orchestrator." },
+      Telemetry:   { purpose: "Unified telemetry bus.", desc: "DI mixins push metrics/traces; optionally mirror events to Chronicle." }
+    };
+
+    // Optional deep links (hash/localStorage) ---------------------------------
+    function loadLinksFromHash(){
+      const h = location.hash ? decodeURIComponent(location.hash.slice(1)) : "";
+      if (!h) return {};
+      try {
+        const kv = new URLSearchParams(h);
+        const out = {};
+        kv.forEach((v,k)=>out[k]=v);
+        return out;
+      } catch { return {}; }
+    }
+    const savedLinks = loadLinksFromHash();
+    const localLinks = JSON.parse(localStorage.getItem("omega_node_links")||"{}");
+    const links = Object.assign({}, localLinks, savedLinks);
+
+    // UI handles --------------------------------------------------------------
+    const ovTitle   = document.getElementById('ovTitle');
+    const ovGroup   = document.getElementById('ovGroup');
+    const ovBadge   = document.getElementById('ovBadge');
+    const ovPurpose = document.getElementById('ovPurpose');
+    const ovDesc    = document.getElementById('ovDesc');
+    const ovLink    = document.getElementById('ovLink');
+    const searchInput = document.getElementById('searchInput');
+    const wrap = document.getElementById('wrap');
+    let selectedNode = null;
+
+    function selectNode(n){
+      selectedNode = n;
+      cy.batch(() => {
+        cy.elements().removeClass('highlight faded');
+        const neighborhood = n.closedNeighborhood();
+        cy.elements().not(neighborhood).addClass('faded');
+        neighborhood.addClass('highlight');
+      });
+      const id = n.id();
+      ovTitle.textContent = n.data('label') || id;
+      const group = n.data('parent') || "—";
+      ovGroup.textContent = groups[group]?.label || group;
+      ovBadge.textContent = group;
+      const info = nodeInfo[id] || { purpose: "—", desc: "" };
+      ovPurpose.textContent = info.purpose;
+      ovDesc.textContent = info.desc;
+      if (links[id]) { ovLink.href = links[id]; ovLink.style.display = 'inline'; } else { ovLink.style.display = 'none'; }
+    }
+
+    cy.on('tap', 'node', evt => selectNode(evt.target));
+
+    // Search ------------------------------------------------------------------
+    document.addEventListener('keydown', (e)=>{ if(e.key==="/"){ e.preventDefault(); searchInput.focus(); } if (e.key==="f"){ cy.fit(cy.elements(),60); } if (e.key==="+"|| e.key==="="){ zoomDelta(1); } if(e.key==="-"||e.key==="_"){ zoomDelta(-1); } });
+    searchInput.addEventListener('input', () => {
+      const q = searchInput.value.trim().toLowerCase();
+      cy.elements().removeClass('highlight faded');
+      if(!q) return;
+      const matches = cy.nodes().filter(n => (n.data('label')||'').toLowerCase().includes(q));
+      if(matches.length){
+        const union = matches.union(matches.neighborhood());
+        cy.elements().not(union).addClass('faded');
+        matches.addClass('highlight');
+        cy.animate({ fit: { eles: matches, padding: 100 }, duration: 400 });
+      }
+    });
+
+    // Group show/hide ---------------------------------------------------------
+    const groupChecks = document.querySelectorAll('input[type="checkbox"][data-group]');
+    function updateGroupVisibility(){
+      const hiddenGroups = [];
+      groupChecks.forEach(ch => { if(!ch.checked) hiddenGroups.push(ch.dataset.group); });
+      cy.elements().removeClass('hide faded');
+      hiddenGroups.forEach(g => {
+        const nodesInGroup = cy.nodes().filter(n => n.data('parent') === g || n.id() === g);
+        const connectedEdges = nodesInGroup.closedNeighborhood().edges();
+        nodesInGroup.addClass('hide');
+        connectedEdges.addClass('hide');
+      });
+      cy.resize();
+      cy.fit(cy.elements(':visible'), 60);
+    }
+    groupChecks.forEach(ch => ch.addEventListener('change', updateGroupVisibility));
+    updateGroupVisibility();
+
+    // Edge filters ------------------------------------------------------------
+    const edgeChecks = document.querySelectorAll('input[type="checkbox"][data-edge]');
+    function updateEdgeVisibility(){
+      const hideTypes = [];
+      edgeChecks.forEach(ch => { if(!ch.checked) hideTypes.push(ch.dataset.edge); });
+      cy.edges().removeClass('hide');
+      hideTypes.forEach(t => cy.edges('.'+t).addClass('hide'));
+      cy.resize();
+      cy.fit(cy.elements(':visible'), 60);
+    }
+    edgeChecks.forEach(ch => ch.addEventListener('change', updateEdgeVisibility));
+    updateEdgeVisibility();
+
+    // Buttons -----------------------------------------------------------------
+    document.getElementById('fitBtn').addEventListener('click', () => cy.fit(cy.elements(':visible'), 60));
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      cy.elements().removeClass('highlight faded hide');
+      groupChecks.forEach(ch => ch.checked = true);
+      edgeChecks.forEach(ch => ch.checked = true);
+      updateGroupVisibility();
+      updateEdgeVisibility();
+      cy.layout({ name:'fcose', animate:true, randomize:true, nodeDimensionsIncludeLabels:true, idealEdgeLength:160, nodeSeparation:70, nodeRepulsion:5500, padding:50 }).run();
+      cy.fit(cy.elements(),60);
+    });
+
+    // Zoom +/- ----------------------------------------------------------------
+    function zoomDelta(dir){
+      const step = 0.15;
+      const level = cy.zoom() * (dir > 0 ? (1+step) : (1-step));
+      const center = { x: cy.width()/2, y: cy.height()/2 };
+      cy.zoom({ level, renderedPosition: center });
+    }
+    document.getElementById('zoomInBtn').addEventListener('click', () => zoomDelta(1));
+    document.getElementById('zoomOutBtn').addEventListener('click', () => zoomDelta(-1));
+
+    // Toggle sidebar ----------------------------------------------------------
+    const toggleBtn = document.getElementById('toggleSidebarBtn');
+    let collapsed = false;
+    function toggleSidebar(force){
+      collapsed = force !== undefined ? force : !collapsed;
+      wrap.classList.toggle('collapsed', collapsed);
+      setTimeout(() => { cy.resize(); cy.fit(cy.elements(':visible'), 60); }, 220);
+    }
+    toggleBtn.addEventListener('click', () => toggleSidebar());
+
+    // Export PNG / SVG --------------------------------------------------------
+    function downloadURI(uri, name){
+      const a = document.createElement('a'); a.href = uri; a.download = name; a.click();
+    }
+    document.getElementById('pngBtn').addEventListener('click', () => {
+      const png64 = cy.png({ full: true, bg: '#0b1020', scale: 2 });
+      downloadURI(png64, 'omega-architecture.png');
+    });
+    document.getElementById('svgBtn').addEventListener('click', () => {
+      const svgStr = cy.svg({ full: true, scale: 1, bg: '#0b1020' });
+      const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob); downloadURI(url, 'omega-architecture.svg'); setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    });
+
+    // Share URL state (links only) --------------------------------------------
+    document.getElementById('shareBtn').addEventListener('click', () => {
+      const params = new URLSearchParams();
+      Object.entries(links).forEach(([k,v]) => { if(v) params.set(k, v); });
+      const hash = params.toString();
+      const shareUrl = location.origin + location.pathname + (hash ? '#'+encodeURIComponent(hash) : '');
+      navigator.clipboard.writeText(shareUrl).then(()=>alert('Copied shareable URL with node links to clipboard.'));
+    });
+
+    // Fit to area on first render --------------------------------------------
+    cy.one('render', () => { cy.fit(cy.elements(), 60); });
+  </script>
+</body>
+</html>
