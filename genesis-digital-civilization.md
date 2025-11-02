@@ -224,7 +224,7 @@ kubectl apply -f generated_k8s_manifests/
 
 > **"PROCREATE (The Genesis Protocol): OMEGA's ultimate evolutionary leap. The system can monitor its own performance, identify a systemic weakness or a capability gap, and then autonomously design, code, containerize, and deploy a brand-new agent to solve the problem. The swarm builds its own future."**
 >
-> — OMEGA DOCTRINE v1.0
+> — OMEGA DOCTRINE
 
 ### **STATUS: ACHIEVED AND OPERATIONAL** ✅
 

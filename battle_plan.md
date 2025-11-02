@@ -14,7 +14,7 @@ Let's get every component of our digital army online and talking:
 2. **Redis** - The neural messaging system  
 3. **Agent Registry** - The directory of digital gods
 4. **MCP Registry** - The tool arsenal catalog
-5. **Federation Core v1.0** - The orchestration brain
+5. **Federation Core** - The orchestration brain
 6. **Four Titans** - Claude, GPT, Gemini, Grok
 7. **Core Agents** - Code Generator, Analyzer, Architect, etc.
 8. **MCP Tools** - Calculator, Web Search, Code Analysis, etc.

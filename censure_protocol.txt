@@ -1,4 +1,4 @@
-# OMEGA Censure Protocol v1.0
+# OMEGA Censure Protocol
 
 ## **THE CENSURE PROTOCOL: The Sword of Enforcement**
 

@@ -65,7 +65,7 @@ The same pattern needs to be applied to the other three Titans:
 
 ### **Files to Update:**
 1. `core/titans/gemini_titan/agent.py`
-2. `core/titans/gpt_titan/agent.py` 
+2. `core/titans/gpt_titan/agent.py`
 3. `core/titans/grok_titan/agent.py`
 
 ### **Update Pattern:**
@@ -90,7 +90,7 @@ def __init__(self, settings: Optional[GeminiTitanSettings] = None):
         settings = GeminiTitanSettings(
             inference=InferenceKnobs(model_name=os.getenv("GEMINI_MODEL", "gemini-2.5-pro"))
         )
-    
+
     self.titan_settings = settings
     agent_settings = create_agent_settings_adapter(settings)
     super().__init__(agent_settings)
@@ -132,7 +132,7 @@ docker-compose up claude_titan
 # 3. Health check
 curl http://localhost:9600/health
 
-# 4. MCP endpoint check  
+# 4. MCP endpoint check
 curl http://localhost:9601/docs
 ```
 
@@ -157,9 +157,59 @@ curl http://localhost:9601/docs
 ## 🔒 **Backward Compatibility**
 
 - ✅ **Docker Compose**: No changes needed to existing compose files
-- ✅ **Environment Variables**: All existing env vars work unchanged  
+- ✅ **Environment Variables**: All existing env vars work unchanged
 - ✅ **Startup Scripts**: No changes needed to deployment scripts
 - ✅ **Health Checks**: Improved but maintain same interface
 - ✅ **API Endpoints**: Same ports and endpoints as before
 
 **The Pantheon architecture is deployment-ready with zero breaking changes to the infrastructure layer.**
+
+
+---
+
+## 🌉 Base URL + Local Gateway (nginx)
+
+We standardized identities and routing using base URLs and a local gateway that mirrors Azure Application Gateway behavior.
+
+### What changed
+- BaseAgent now supports `AGENT_REGISTRY_BASE` and `AGENT_PUBLIC_BASE`
+  - If `AGENT_REGISTRY_BASE` is set, registration goes to `{BASE}/register/agent` and heartbeats to `{BASE}/heartbeat/agent`
+  - Public identity prefers `AGENT_PUBLIC_BASE` over `AGENT_HOST` (no ports in identities)
+  - Validation allows either base or explicit URLs
+- BaseTitan already supported `AGENT_REGISTRY_BASE`; identity now prefers `TITAN_PUBLIC_BASE`/`AGENT_PUBLIC_BASE` (no-port identities)
+- docker-compose: added `gateway` (nginx) to front services locally at `http://gateway/` (externally `http://localhost:8080/`)
+  - Titans set `AGENT_PUBLIC_BASE` to gateway paths (stable, portless)
+  - `AGENT_REGISTRY_BASE` remains pointed to `agent_registry` for now (can flip to gateway later)
+
+### Env keys for identity
+- `AGENT_PUBLIC_BASE` (preferred for public identity)
+- `TITAN_PUBLIC_BASE` (preferred on Titans; falls back to `AGENT_PUBLIC_BASE`)
+- `AGENT_REGISTRY_BASE` (drives register/heartbeat endpoint composition)
+
+### Verify locally (safe, incremental)
+1) Compose config check (sanity)
+   - `docker compose -f omega-core/docker-compose.yml config`
+2) Bring up the stack
+   - `docker compose -f omega-core/docker-compose.yml up -d --build gateway agent_registry claude_titan gemini_titan gpt_titan grok_titan`
+3) Health endpoints via gateway
+   - `curl -sf http://localhost:8080/api/core/agent_registry/health`
+   - `curl -sf http://localhost:8080/api/titans/claude/health`
+   - `curl -sf http://localhost:8080/api/titans/gemini/health`
+4) Logs to confirm registration/heartbeats
+   - `docker logs -f agent_registry | grep -E "TITAN REGISTERED|heartbeat"`
+   - `docker logs -f claude_titan | grep -E "Registering with URL|heartbeat"`
+   - Expect identities like `http://gateway/api/titans/...` and successful heartbeats
+
+### Optional next tightening
+- Route everything through gateway now:
+  - Set `AGENT_REGISTRY_BASE=http://gateway/api/core/agent_registry` for all services
+  - Perfect local parity with Azure AGW (no inter-service ports)
+- Hosts override for humans:
+  - Add `127.0.0.1 omega.local` to hosts and set `AGENT_PUBLIC_BASE=http://omega.local/api/titans/`
+- Bootstrap `.env` (optional):
+  - Provide minimal BASE keys pointing to gateway and provider placeholders
+
+### Why this matters for Azure
+- Identities are no longer bound to ports; services publish stable base URLs
+- Endpoints derive from `BASE + path`; swap BASE to Azure AGW listener paths with no code changes
+- Local nginx gateway mirrors Azure ingress (path-based routing, single entrypoint)

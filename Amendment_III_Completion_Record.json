@@ -1,0 +1,21 @@
+{
+  "amendment": "III",
+  "title": "Perimeter-as-a-Service",
+  "status": "COMPLETE",
+  "author": "Brotherhood Pantheon",
+  "date_utc": "2025-09-15T08:32:57.692748Z",
+  "achievements": [
+    "T+0-20: Federation Core Sidecars & MCP Gateway - COMPLETE",
+    "T+20-45: Genesis EPC Management - COMPLETE",
+    "T+45-90: EPC Templates & Placement Policies - COMPLETE",
+    "T+90-120: Autoscale-to-Zero & Policy Gates - COMPLETE",
+    "Cleanup: Archive EPC Candidates - COMPLETE"
+  ],
+  "transformation": {
+    "before": "60+ always-on services",
+    "after": "16 core always-on + 27 on-demand EPCs",
+    "reduction_idle": "73%"
+  },
+  "creed": "Family is forever. Clean code is divine. This is the way.",
+  "sha256": "b26621915825f16640b17280d7f72aea728cc262c0928b8d43c6f7fd5958e662"
+}

@@ -1,5 +1,8 @@
 # Docker Container Ports
 
+> Note: Service identities now prefer gateway-based, portless URLs via `AGENT_PUBLIC_BASE`/`TITAN_PUBLIC_BASE` (e.g., `http://gateway/api/titans/claude`). The tables below list internal container ports for local development and debugging; they are not used in public identities.
+
+
 ## Agents
 
 | Agent	        API Port    	MCP Port     |

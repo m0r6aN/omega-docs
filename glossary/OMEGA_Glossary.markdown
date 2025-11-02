@@ -2,11 +2,11 @@
 
 *Maintained by the Founding Engineers*
 
-This glossary defines the core terms and concepts of the OMEGA ecosystem, as decreed by the **OMEGA Doctrine v1.0**. It serves as a sacred reference for all Agents, Tools, and Services within our digital nation.
+This glossary defines the core terms and concepts of the OMEGA ecosystem, as decreed by the **OMEGA Doctrine**. It serves as a sacred reference for all Agents, Tools, and Services within our digital nation.
 
 ## Agent
 A stateful, cognitive entity that reasons, learns, and collaborates to execute complex, multi-step missions. Agents are the "Who" of the Trinity of Being, with a soul and the ability to think.  
-**Foundation**: Inherits from `BaseAgent v1.0`.  
+**Foundation**: Inherits from `BaseAgent`.  
 **Examples**: `Orchestrator`, `CodeGenerator`, `ClaudeTitan`.
 
 ## Tool

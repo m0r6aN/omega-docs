@@ -38,7 +38,7 @@ The OMEGA SDK represents our bridge to mass adoption - the definitive developer 
 - **Stateless function validators** ensuring doctrine compliance
 - **Dockerization utilities** for instant deployment
 
-**Vote Required:** Must-have for v1.0? Implementation complexity concerns?
+**Vote Required:** Must-have for? Implementation complexity concerns?
 
 #### A3. Workflow Builder SDK
 - **Visual workflow designer** integration APIs
@@ -109,7 +109,7 @@ The OMEGA SDK represents our bridge to mass adoption - the definitive developer 
 - **Java SDK** for enterprise environments
 - **REST/GraphQL APIs** for language-agnostic access
 
-**Vote Required:** Which languages for v1.0? Resource allocation concerns?**
+**Vote Required:** Which languages for? Resource allocation concerns?**
 
 ---
 
@@ -208,7 +208,7 @@ The OMEGA SDK represents our bridge to mass adoption - the definitive developer 
 
 **For each category, Titans vote on:**
 
-1. **Priority Level** (1-5, where 5 = critical for v1.0)
+1. **Priority Level** (1-5, where 5 = critical for)
 2. **Implementation Complexity** (1-5, where 5 = extremely complex)
 3. **Business Impact** (1-5, where 5 = major revenue driver)
 4. **Go/No-Go** for initial release inclusion

@@ -1,0 +1,3397 @@
+Claude 4.1 Opus
+----------------
+"I'll create a production-ready Crypto Sentiment Intel Registrar (CSIR) agent using Python and FastMCP. This is a comprehensive implementation with all the components you specified."
+
+```python
+# /agents/sentiment_registrar/src/app.py
+"""
+Crypto Sentiment Intel Registrar (CSIR) - Main Application
+Production-ready dual-mode agent with FastAPI and Redis Pub/Sub
+"""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+from datetime import datetime, timezone
+import json
+import hashlib
+import hmac
+
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings
+import httpx
+import redis.asyncio as redis
+from motor.motor_asyncio import AsyncIOMotorClient
+import structlog
+from contextlib import asynccontextmanager
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from agent import SentimentRegistrarAgent
+from discovery.crawlers import DiscoveryEngine
+from evaluation.scoring import ScoringEngine
+from evaluation.validators import POMLValidator
+from emitters.poml_writer import POMLWriter
+from emitters.registry_index import RegistryIndexBuilder
+from mcp.tool_factory import MCPToolFactory
+
+# Configure structured logging
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.processors.JSONRenderer()
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
+
+# Settings
+class Settings(BaseSettings):
+    # App config
+    app_name: str = "CSIR"
+    app_version: str = "1.0.0"
+    environment: str = "production"
+    debug: bool = False
+    
+    # Server
+    host: str = "0.0.0.0"
+    port: int = 8080
+    workers: int = 4
+    
+    # MongoDB
+    mongodb_url: str = "mongodb://localhost:27017"
+    mongodb_db: str = "csir"
+    
+    # Redis
+    redis_url: str = "redis://localhost:6379"
+    redis_channel_prefix: str = "omega.research.sentiment"
+    
+    # Paths
+    registry_path: Path = Path("./registry")
+    sources_path: Path = Path("./registry/sources")
+    index_path: Path = Path("./registry/index.json")
+    seeds_path: Path = Path("./src/discovery/seeds.yaml")
+    
+    # Security
+    hmac_secret: str = Field(default="change-me-in-production")
+    allowed_domains: List[str] = ["*"]
+    user_agent: str = "CSIR/1.0 (https://github.com/org/csir)"
+    
+    # Rate limiting
+    max_concurrent_discoveries: int = 10
+    max_requests_per_second: float = 10.0
+    backoff_base_ms: int = 250
+    backoff_max_ms: int = 16000
+    
+    # Scoring weights
+    scoring_weights: Dict[str, float] = {
+        "coverage": 0.25,
+        "freshness": 0.15,
+        "quality": 0.20,
+        "access": 0.10,
+        "compliance": 0.10,
+        "integrability": 0.10,
+        "stability": 0.10
+    }
+    
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+settings = Settings()
+
+# Request/Response Models
+class SweepRequest(BaseModel):
+    """Request model for triggering a discovery sweep"""
+    mode: str = Field(default="incremental", description="full|incremental|targeted")
+    targets: Optional[List[str]] = Field(default=None, description="Specific URLs to probe")
+    force: bool = Field(default=False, description="Force re-evaluation of existing resources")
+    dry_run: bool = Field(default=False, description="Validate without writing")
+
+class SweepResponse(BaseModel):
+    """Response model for sweep operations"""
+    job_id: str
+    status: str
+    started_at: datetime
+    message: str
+    stats: Optional[Dict[str, Any]] = None
+
+class ResourceResponse(BaseModel):
+    """Response model for resource queries"""
+    resource_id: str
+    poml: Dict[str, Any]
+    live_status: Optional[Dict[str, Any]] = None
+    last_checked: datetime
+    version: str
+
+# Lifespan manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle"""
+    # Startup
+    logger.info("Starting CSIR", version=settings.app_version, env=settings.environment)
+    
+    # Initialize MongoDB
+    app.state.mongo_client = AsyncIOMotorClient(settings.mongodb_url)
+    app.state.db = app.state.mongo_client[settings.mongodb_db]
+    
+    # Initialize Redis
+    app.state.redis = await redis.from_url(settings.redis_url, decode_responses=True)
+    
+    # Ensure directories exist
+    settings.registry_path.mkdir(parents=True, exist_ok=True)
+    settings.sources_path.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize agent
+    app.state.agent = SentimentRegistrarAgent(
+        settings=settings,
+        db=app.state.db,
+        redis_client=app.state.redis,
+        logger=logger
+    )
+    
+    # Start background tasks
+    app.state.background_tasks = []
+    
+    # Start Redis subscriber
+    subscriber_task = asyncio.create_task(app.state.agent.start_subscriber())
+    app.state.background_tasks.append(subscriber_task)
+    
+    # Start periodic sweep
+    sweep_task = asyncio.create_task(app.state.agent.start_periodic_sweep())
+    app.state.background_tasks.append(sweep_task)
+    
+    logger.info("CSIR initialized successfully")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down CSIR")
+    
+    # Cancel background tasks
+    for task in app.state.background_tasks:
+        task.cancel()
+    
+    await asyncio.gather(*app.state.background_tasks, return_exceptions=True)
+    
+    # Close connections
+    await app.state.redis.close()
+    app.state.mongo_client.close()
+    
+    logger.info("CSIR shutdown complete")
+
+# Initialize FastAPI
+app = FastAPI(
+    title="Crypto Sentiment Intel Registrar",
+    description="Discovers, evaluates, and documents crypto sentiment data sources",
+    version=settings.app_version,
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_domains,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Security middleware
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    """Add security headers and validate HMAC for webhooks"""
+    # Add security headers
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    
+    # Validate HMAC for webhook endpoints
+    if request.url.path.startswith("/webhook/"):
+        signature = request.headers.get("X-CSIR-Signature")
+        if not signature:
+            return JSONResponse(status_code=401, content={"error": "Missing signature"})
+        
+        body = await request.body()
+        expected = hmac.new(
+            settings.hmac_secret.encode(),
+            body,
+            hashlib.sha256
+        ).hexdigest()
+        
+        if not hmac.compare_digest(signature, expected):
+            return JSONResponse(status_code=401, content={"error": "Invalid signature"})
+    
+    return response
+
+# Health check
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "version": settings.app_version,
+        "environment": settings.environment,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+# Trigger discovery sweep
+@app.post("/research/sentiment/sweep", response_model=SweepResponse)
+async def trigger_sweep(
+    request: SweepRequest,
+    background_tasks: BackgroundTasks
+):
+    """Trigger a discovery and evaluation sweep"""
+    job_id = hashlib.sha256(
+        f"{datetime.now().isoformat()}{request.json()}".encode()
+    ).hexdigest()[:16]
+    
+    logger.info(
+        "Sweep requested",
+        job_id=job_id,
+        mode=request.mode,
+        targets=request.targets,
+        force=request.force,
+        dry_run=request.dry_run
+    )
+    
+    # Start sweep in background
+    background_tasks.add_task(
+        app.state.agent.run_sweep,
+        job_id=job_id,
+        mode=request.mode,
+        targets=request.targets,
+        force=request.force,
+        dry_run=request.dry_run
+    )
+    
+    return SweepResponse(
+        job_id=job_id,
+        status="started",
+        started_at=datetime.now(timezone.utc),
+        message=f"Sweep {job_id} started in {request.mode} mode"
+    )
+
+# Get resource by ID
+@app.get("/resource/{resource_id}", response_model=ResourceResponse)
+async def get_resource(resource_id: str):
+    """Get a resource by ID with live status"""
+    poml_path = settings.sources_path / f"{resource_id}.poml"
+    
+    if not poml_path.exists():
+        raise HTTPException(status_code=404, detail=f"Resource {resource_id} not found")
+    
+    try:
+        # Load POML
+        import yaml
+        with open(poml_path, "r") as f:
+            poml = yaml.safe_load(f)
+        
+        # Get live status (optional)
+        live_status = await app.state.agent.check_live_status(resource_id, poml)
+        
+        return ResourceResponse(
+            resource_id=resource_id,
+            poml=poml,
+            live_status=live_status,
+            last_checked=datetime.fromisoformat(poml["evaluation"]["last_checked"]),
+            version=poml["metadata"]["version_semver"]
+        )
+    except Exception as e:
+        logger.error("Failed to get resource", resource_id=resource_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+# List all resources
+@app.get("/resources")
+async def list_resources(
+    category: Optional[str] = None,
+    min_score: Optional[int] = None,
+    pricing_model: Optional[str] = None
+):
+    """List all resources with optional filters"""
+    try:
+        # Load index
+        if settings.index_path.exists():
+            with open(settings.index_path, "r") as f:
+                index = json.load(f)
+        else:
+            index = {"resources": [], "metadata": {}}
+        
+        resources = index.get("resources", [])
+        
+        # Apply filters
+        if category:
+            resources = [r for r in resources if r.get("category") == category]
+        if min_score is not None:
+            resources = [r for r in resources if r.get("total_score", 0) >= min_score]
+        if pricing_model:
+            resources = [r for r in resources if r.get("pricing_model") == pricing_model]
+        
+        return {
+            "total": len(resources),
+            "resources": resources,
+            "filters": {
+                "category": category,
+                "min_score": min_score,
+                "pricing_model": pricing_model
+            }
+        }
+    except Exception as e:
+        logger.error("Failed to list resources", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Get sweep status
+@app.get("/research/sentiment/sweep/{job_id}")
+async def get_sweep_status(job_id: str):
+    """Get the status of a sweep job"""
+    job = await app.state.db.sweep_jobs.find_one({"job_id": job_id})
+    
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    # Remove MongoDB _id field
+    job.pop("_id", None)
+    
+    return job
+
+# MCP tool endpoints
+@app.get("/mcp/tools")
+async def list_mcp_tools():
+    """List all available MCP tools generated from POML resources"""
+    factory = MCPToolFactory(settings=settings)
+    tools = await factory.list_tools()
+    
+    return {
+        "total": len(tools),
+        "tools": tools
+    }
+
+@app.post("/mcp/tools/{tool_name}/invoke")
+async def invoke_mcp_tool(tool_name: str, request: Request):
+    """Invoke an MCP tool"""
+    factory = MCPToolFactory(settings=settings)
+    
+    try:
+        body = await request.json()
+        result = await factory.invoke_tool(tool_name, body)
+        return result
+    except Exception as e:
+        logger.error("Failed to invoke MCP tool", tool=tool_name, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Webhook for external triggers
+@app.post("/webhook/github")
+async def github_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Handle GitHub webhooks for new sentiment resources"""
+    body = await request.json()
+    event = request.headers.get("X-GitHub-Event")
+    
+    if event == "push":
+        # Extract URLs from commit messages or PR descriptions
+        urls = app.state.agent.extract_urls_from_github(body)
+        if urls:
+            background_tasks.add_task(
+                app.state.agent.run_sweep,
+                job_id=f"github-{body.get('head_commit', {}).get('id', 'unknown')[:8]}",
+                mode="targeted",
+                targets=urls
+            )
+    
+    return {"status": "accepted"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app:app",
+        host=settings.host,
+        port=settings.port,
+        workers=settings.workers,
+        reload=settings.debug,
+        log_config={
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                },
+                "json": {
+                    "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                    "format": "%(asctime)s %(name)s %(levelname)s %(message)s"
+                }
+            },
+            "handlers": {
+                "default": {
+                    "formatter": "json",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout"
+                }
+            },
+            "root": {
+                "level": "INFO",
+                "handlers": ["default"]
+            }
+        }
+    )
+```
+
+```python
+# /agents/sentiment_registrar/src/agent.py
+"""
+Core orchestration agent for sentiment resource discovery and registration
+"""
+
+import asyncio
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, List
+import json
+import re
+from pathlib import Path
+
+import httpx
+import yaml
+from motor.motor_asyncio import AsyncIOMotorDatabase
+import redis.asyncio as redis
+import structlog
+
+from discovery.crawlers import DiscoveryEngine
+from discovery.heuristics import SentimentHeuristics
+from evaluation.schema import ResourceModel, PlanModel, AccessModel
+from evaluation.scoring import ScoringEngine
+from evaluation.validators import POMLValidator
+from evaluation.normalizers import ResourceNormalizer
+from emitters.poml_writer import POMLWriter
+from emitters.registry_index import RegistryIndexBuilder
+
+class SentimentRegistrarAgent:
+    """Main orchestration agent for CSIR"""
+    
+    def __init__(
+        self,
+        settings,
+        db: AsyncIOMotorDatabase,
+        redis_client: redis.Redis,
+        logger: structlog.BoundLogger
+    ):
+        self.settings = settings
+        self.db = db
+        self.redis = redis_client
+        self.logger = logger
+        
+        # Initialize components
+        self.discovery = DiscoveryEngine(settings, logger)
+        self.heuristics = SentimentHeuristics(logger)
+        self.scoring = ScoringEngine(settings.scoring_weights, logger)
+        self.validator = POMLValidator(logger)
+        self.normalizer = ResourceNormalizer(logger)
+        self.writer = POMLWriter(settings, logger)
+        self.index_builder = RegistryIndexBuilder(settings, logger)
+        
+        # Rate limiting
+        self.semaphore = asyncio.Semaphore(settings.max_concurrent_discoveries)
+        self.last_request_time = {}
+        
+    async def run_sweep(
+        self,
+        job_id: str,
+        mode: str = "incremental",
+        targets: Optional[List[str]] = None,
+        force: bool = False,
+        dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Run a discovery and evaluation sweep"""
+        start_time = datetime.now(timezone.utc)
+        
+        # Log job start
+        await self.db.sweep_jobs.insert_one({
+            "job_id": job_id,
+            "mode": mode,
+            "targets": targets,
+            "force": force,
+            "dry_run": dry_run,
+            "status": "running",
+            "started_at": start_time.isoformat(),
+            "stats": {
+                "discovered": 0,
+                "evaluated": 0,
+                "written": 0,
+                "errors": 0
+            }
+        })
+        
+        try:
+            # Phase 1: Discovery
+            self.logger.info("Starting discovery phase", job_id=job_id, mode=mode)
+            
+            if targets:
+                candidates = await self.discovery.probe_targets(targets)
+            elif mode == "full":
+                candidates = await self.discovery.full_sweep()
+            else:
+                candidates = await self.discovery.incremental_sweep()
+            
+            discovered_count = len(candidates)
+            
+            # Update job stats
+            await self.db.sweep_jobs.update_one(
+                {"job_id": job_id},
+                {"$set": {"stats.discovered": discovered_count}}
+            )
+            
+            # Phase 2: Evaluation & Normalization
+            self.logger.info("Starting evaluation phase", job_id=job_id, candidates=discovered_count)
+            
+            resources = []
+            for candidate in candidates:
+                async with self.semaphore:
+                    try:
+                        # Check if it's sentiment-related
+                        if not await self.heuristics.is_sentiment_resource(candidate):
+                            continue
+                        
+                        # Probe and normalize
+                        raw_data = await self.discovery.probe_resource(candidate["url"])
+                        normalized = await self.normalizer.normalize(raw_data)
+                        
+                        # Score
+                        scores = await self.scoring.score_resource(normalized)
+                        normalized["evaluation"]["subscores"] = scores["subscores"]
+                        normalized["evaluation"]["total_score"] = scores["total"]
+                        normalized["evaluation"]["notes"] = scores.get("notes", "")
+                        normalized["evaluation"]["last_checked"] = datetime.now(timezone.utc).isoformat()
+                        
+                        # Validate
+                        if self.validator.validate_poml(normalized):
+                            resources.append(normalized)
+                        
+                    except Exception as e:
+                        self.logger.error(
+                            "Failed to evaluate candidate",
+                            url=candidate.get("url"),
+                            error=str(e)
+                        )
+                        await self.db.sweep_jobs.update_one(
+                            {"job_id": job_id},
+                            {"$inc": {"stats.errors": 1}}
+                        )
+            
+            evaluated_count = len(resources)
+            
+            # Update job stats
+            await self.db.sweep_jobs.update_one(
+                {"job_id": job_id},
+                {"$set": {"stats.evaluated": evaluated_count}}
+            )
+            
+            # Phase 3: Write POML files
+            if not dry_run:
+                self.logger.info("Starting write phase", job_id=job_id, resources=evaluated_count)
+                
+                written_count = 0
+                for resource in resources:
+                    try:
+                        # Check if exists and needs update
+                        resource_id = resource["resource"]["id"]
+                        existing = await self.load_existing_resource(resource_id)
+                        
+                        if existing and not force:
+                            # Check if update needed
+                            if not self.needs_update(existing, resource):
+                                continue
+                        
+                        # Write POML
+                        await self.writer.write_resource(resource)
+                        written_count += 1
+                        
+                        # Emit event
+                        await self.emit_update_event(resource_id, existing, resource)
+                        
+                    except Exception as e:
+                        self.logger.error(
+                            "Failed to write resource",
+                            resource_id=resource.get("resource", {}).get("id"),
+                            error=str(e)
+                        )
+                        await self.db.sweep_jobs.update_one(
+                            {"job_id": job_id},
+                            {"$inc": {"stats.errors": 1}}
+                        )
+                
+                # Update job stats
+                await self.db.sweep_jobs.update_one(
+                    {"job_id": job_id},
+                    {"$set": {"stats.written": written_count}}
+                )
+                
+                # Rebuild index
+                await self.index_builder.build_index()
+            
+            # Complete job
+            end_time = datetime.now(timezone.utc)
+            duration = (end_time - start_time).total_seconds()
+            
+            await self.db.sweep_jobs.update_one(
+                {"job_id": job_id},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "completed_at": end_time.isoformat(),
+                        "duration_seconds": duration
+                    }
+                }
+            )
+            
+            self.logger.info(
+                "Sweep completed",
+                job_id=job_id,
+                duration=duration,
+                discovered=discovered_count,
+                evaluated=evaluated_count,
+                written=written_count if not dry_run else 0
+            )
+            
+            return {
+                "job_id": job_id,
+                "status": "completed",
+                "stats": {
+                    "discovered": discovered_count,
+                    "evaluated": evaluated_count,
+                    "written": written_count if not dry_run else 0,
+                    "duration_seconds": duration
+                }
+            }
+            
+        except Exception as e:
+            self.logger.error("Sweep failed", job_id=job_id, error=str(e))
+            
+            await self.db.sweep_jobs.update_one(
+                {"job_id": job_id},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "error": str(e),
+                        "failed_at": datetime.now(timezone.utc).isoformat()
+                    }
+                }
+            )
+            
+            raise
+    
+    async def load_existing_resource(self, resource_id: str) -> Optional[Dict[str, Any]]:
+        """Load existing POML resource"""
+        poml_path = self.settings.sources_path / f"{resource_id}.poml"
+        
+        if not poml_path.exists():
+            return None
+        
+        try:
+            with open(poml_path, "r") as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            self.logger.error("Failed to load resource", resource_id=resource_id, error=str(e))
+            return None
+    
+    def needs_update(self, existing: Dict[str, Any], new: Dict[str, Any]) -> bool:
+        """Check if resource needs update"""
+        # Check last checked time
+        existing_checked = datetime.fromisoformat(existing["evaluation"]["last_checked"])
+        age_days = (datetime.now(timezone.utc) - existing_checked).days
+        
+        # Update if older than 7 days
+        if age_days > 7:
+            return True
+        
+        # Check if score changed significantly
+        existing_score = existing["evaluation"]["total_score"]
+        new_score = new["evaluation"]["total_score"]
+        
+        if abs(existing_score - new_score) > 5:
+            return True
+        
+        # Check if critical fields changed
+        critical_fields = [
+            "access.pricing_model",
+            "data_model.update_frequency",
+            "interfaces.http.base_url"
+        ]
+        
+        for field_path in critical_fields:
+            if self.get_nested_value(existing, field_path) != self.get_nested_value(new, field_path):
+                return True
+        
+        return False
+    
+    def get_nested_value(self, data: Dict[str, Any], path: str) -> Any:
+        """Get nested dictionary value by dot notation path"""
+        keys = path.split(".")
+        value = data
+        
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key)
+            else:
+                return None
+        
+        return value
+    
+    async def emit_update_event(
+        self,
+        resource_id: str,
+        existing: Optional[Dict[str, Any]],
+        new: Dict[str, Any]
+    ):
+        """Emit update event to Redis"""
+        event = {
+            "event": "resource.updated" if existing else "resource.created",
+            "resource_id": resource_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "version": new["metadata"]["version_semver"],
+            "score": new["evaluation"]["total_score"]
+        }
+        
+        # Add diff if updating
+        if existing:
+            event["previous_version"] = existing["metadata"]["version_semver"]
+            event["previous_score"] = existing["evaluation"]["total_score"]
+        
+        channel = f"{self.settings.redis_channel_prefix}.updated"
+        await self.redis.publish(channel, json.dumps(event))
+        
+        self.logger.info(
+            "Event emitted",
+            channel=channel,
+            event=event["event"],
+            resource_id=resource_id
+        )
+    
+    async def check_live_status(self, resource_id: str, poml: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Check live status of a resource"""
+        try:
+            base_url = poml.get("interfaces", {}).get("http", {}).get("base_url")
+            if not base_url:
+                return None
+            
+            async with httpx.AsyncClient() as client:
+                # Simple health check
+                response = await client.get(
+                    base_url,
+                    timeout=5.0,
+                    headers={"User-Agent": self.settings.user_agent}
+                )
+                
+                return {
+                    "online": response.status_code < 500,
+                    "status_code": response.status_code,
+                    "response_time_ms": response.elapsed.total_seconds() * 1000,
+                    "checked_at": datetime.now(timezone.utc).isoformat()
+                }
+                
+        except Exception as e:
+            return {
+                "online": False,
+                "error": str(e),
+                "checked_at": datetime.now(timezone.utc).isoformat()
+            }
+    
+    def extract_urls_from_github(self, webhook_data: Dict[str, Any]) -> List[str]:
+        """Extract URLs from GitHub webhook data"""
+        urls = []
+        
+        # Check commit messages
+        for commit in webhook_data.get("commits", []):
+            message = commit.get("message", "")
+            # Find URLs in commit message
+            url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+            found_urls = re.findall(url_pattern, message)
+            urls.extend(found_urls)
+        
+        # Check PR description if present
+        if "pull_request" in webhook_data:
+            pr_body = webhook_data["pull_request"].get("body", "")
+            found_urls = re.findall(url_pattern, pr_body)
+            urls.extend(found_urls)
+        
+        # Filter for potential sentiment resources
+        filtered = []
+        keywords = ["sentiment", "crypto", "api", "data", "feed", "stream"]
+        for url in urls:
+            if any(keyword in url.lower() for keyword in keywords):
+                filtered.append(url)
+        
+        return filtered
+    
+    async def start_subscriber(self):
+        """Start Redis subscriber for A2A communication"""
+        pubsub = self.redis.pubsub()
+        channel_pattern = f"{self.settings.redis_channel_prefix}.*"
+        
+        await pubsub.psubscribe(channel_pattern)
+        self.logger.info("Redis subscriber started", pattern=channel_pattern)
+        
+        try:
+            async for message in pubsub.listen():
+                if message["type"] == "pmessage":
+                    await self.handle_redis_message(message)
+        except asyncio.CancelledError:
+            await pubsub.punsubscribe(channel_pattern)
+            await pubsub.close()
+            self.logger.info("Redis subscriber stopped")
+    
+    async def handle_redis_message(self, message: Dict[str, Any]):
+        """Handle incoming Redis messages"""
+        try:
+            channel = message["channel"]
+            data = json.loads(message["data"])
+            
+            self.logger.debug("Redis message received", channel=channel, data=data)
+            
+            # Route based on channel
+            if channel.endswith(".discover"):
+                # Trigger targeted discovery
+                urls = data.get("urls", [])
+                if urls:
+                    await self.run_sweep(
+                        job_id=f"redis-{data.get('request_id', 'unknown')}",
+                        mode="targeted",
+                        targets=urls
+                    )
+            
+            elif channel.endswith(".evaluate"):
+                # Re-evaluate specific resource
+                resource_id = data.get("resource_id")
+                if resource_id:
+                    await self.run_sweep(
+                        job_id=f"redis-eval-{resource_id}",
+                        mode="targeted",
+                        targets=[resource_id],
+                        force=True
+                    )
+            
+        except Exception as e:
+            self.logger.error("Failed to handle Redis message", error=str(e), message=message)
+    
+    async def start_periodic_sweep(self):
+        """Start periodic sweep scheduler"""
+        self.logger.info("Periodic sweep scheduler started")
+        
+        try:
+            while True:
+                # Daily incremental sweep
+                await asyncio.sleep(86400)  # 24 hours
+                
+                self.logger.info("Starting scheduled incremental sweep")
+                await self.run_sweep(
+                    job_id=f"scheduled-{datetime.now().strftime('%Y%m%d')}",
+                    mode="incremental"
+                )
+                
+        except asyncio.CancelledError:
+            self.logger.info("Periodic sweep scheduler stopped")
+```
+
+```python
+# /agents/sentiment_registrar/src/discovery/crawlers.py
+"""
+Discovery engine for finding crypto sentiment resources
+"""
+
+import asyncio
+from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, urljoin
+import re
+from pathlib import Path
+
+import httpx
+import yaml
+from bs4 import BeautifulSoup
+import structlog
+from urllib.robotparser import RobotFileParser
+
+class DiscoveryEngine:
+    """Discovers potential sentiment data sources"""
+    
+    def __init__(self, settings, logger: structlog.BoundLogger):
+        self.settings = settings
+        self.logger = logger
+        self.client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            headers={"User-Agent": settings.user_agent}
+        )
+        self.robot_parsers = {}
+    
+    async def full_sweep(self) -> List[Dict[str, Any]]:
+        """Perform full discovery sweep from seeds"""
+        seeds = await self.load_seeds()
+        candidates = []
+        
+        # Process each seed source
+        for seed in seeds:
+            try:
+                self.logger.info("Processing seed", url=seed["url"], type=seed.get("type"))
+                
+                if seed.get("type") == "directory":
+                    found = await self.crawl_directory(seed["url"])
+                elif seed.get("type") == "github":
+                    found = await self.search_github(seed.get("query", "crypto sentiment api"))
+                elif seed.get("type") == "rapidapi":
+                    found = await self.search_rapidapi(seed.get("category", "crypto"))
+                else:
+                    found = await self.crawl_website(seed["url"])
+                
+                candidates.extend(found)
+                
+            except Exception as e:
+                self.logger.error("Failed to process seed", url=seed.get("url"), error=str(e))
+        
+        # Deduplicate
+        seen = set()
+        unique = []
+        for candidate in candidates:
+            key = candidate.get("url", "")
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        
+        return unique
+    
+    async def incremental_sweep(self) -> List[Dict[str, Any]]:
+        """Perform incremental discovery (new sources only)"""
+        # Load last sweep timestamp
+        last_sweep = await self.get_last_sweep_time()
+        
+        # Focus on dynamic sources
+        candidates = []
+        
+        # Check GitHub trending
+        trending = await self.get_github_trending()
+        candidates.extend(trending)
+        
+        # Check Product Hunt
+        product_hunt = await self.get_product_hunt_apis()
+        candidates.extend(product_hunt)
+        
+        # Check recent Reddit posts
+        reddit = await self.search_reddit_recent()
+        candidates.extend(reddit)
+        
+        return candidates
+    
+    async def probe_targets(self, targets: List[str]) -> List[Dict[str, Any]]:
+        """Probe specific target URLs"""
+        candidates = []
+        
+        for url in targets:
+            try:
+                # Check robots.txt
+                if not await self.is_allowed_by_robots(url):
+                    self.logger.warning("Blocked by robots.txt", url=url)
+                    continue
+                
+                # Probe the URL
+                candidate = await self.probe_url(url)
+                if candidate:
+                    candidates.append(candidate)
+                    
+            except Exception as e:
+                self.logger.error("Failed to probe target", url=url, error=str(e))
+        
+        return candidates
+    
+    async def load_seeds(self) -> List[Dict[str, Any]]:
+        """Load seed sources from YAML"""
+        seeds_path = self.settings.seeds_path
+        
+        if not seeds_path.exists():
+            # Default seeds if file doesn't exist
+            return [
+                {"url": "https://alternative.me/crypto/fear-and-greed-index/", "type": "website"},
+                {"url": "https://www.cryptometer.io/api-documentation", "type": "api"},
+                {"url": "https://lunarcrush.com/developers", "type": "api"},
+                {"url": "https://santiment.net/sanapi/", "type": "api"},
+                {"url": "https://github.com/topics/crypto-sentiment", "type": "github"},
+                {"url": "https://rapidapi.com/category/Finance", "type": "rapidapi"},
+                {"url": "https://www.kaggle.com/datasets?search=crypto+sentiment", "type": "directory"}
+            ]
+        
+        with open(seeds_path, "r") as f:
+            data = yaml.safe_load(f)
+            return data.get("seeds", [])
+    
+    async def crawl_website(self, url: str) -> List[Dict[str, Any]]:
+        """Crawl a website for API documentation and endpoints"""
+        candidates = []
+        
+        try:
+            # Check robots.txt
+            if not await self.is_allowed_by_robots(url):
+                return candidates
+            
+            # Fetch homepage
+            response = await self.client.get(url)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Look for API links
+            api_patterns = [
+                r"/api",
+                r"/docs",
+                r"/developers",
+                r"/documentation",
+                r"/swagger",
+                r"/openapi"
+            ]
+            
+            links = soup.find_all("a", href=True)
+            for link in links:
+                href = link["href"]
+                full_url = urljoin(url, href)
+                
+                if any(pattern in href.lower() for pattern in api_patterns):
+                    candidate = {
+                        "url": full_url,
+                        "source": url,
+                        "type": "api_docs",
+                        "title": link.get_text(strip=True)
+                    }
+                    candidates.append(candidate)
+            
+            # Check for OpenAPI/Swagger
+            openapi_url = await self.find_openapi_spec(url)
+            if openapi_url:
+                candidates.append({
+                    "url": openapi_url,
+                    "source": url,
+                    "type": "openapi",
+                    "title": "OpenAPI Specification"
+                })
+            
+        except Exception as e:
+            self.logger.error("Failed to crawl website", url=url, error=str(e))
+        
+        return candidates
+    
+    async def find_openapi_spec(self, base_url: str) -> Optional[str]:
+        """Try to find OpenAPI/Swagger spec"""
+        common_paths = [
+            "/openapi.json",
+            "/swagger.json",
+            "/api/swagger.json",
+            "/api/openapi.json",
+            "/v1/openapi.json",
+            "/docs/openapi.json",
+            "/api-docs",
+            "/api/docs"
+        ]
+        
+        for path in common_paths:
+            try:
+                url = urljoin(base_url, path)
+                response = await self.client.head(url, follow_redirects=True)
+                if response.status_code == 200:
+                    return url
+            except:
+                continue
+        
+        return None
+    
+    async def search_github(self, query: str) -> List[Dict[str, Any]]:
+        """Search GitHub for relevant repositories"""
+        candidates = []
+        
+        try:
+            # GitHub search API (unauthenticated has low rate limit)
+            response = await self.client.get(
+                "https://api.github.com/search/repositories",
+                params={
+                    "q": query,
+                    "sort": "stars",
+                    "order": "desc",
+                    "per_page": 20
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                for repo in data.get("items", []):
+                    # Check if it has API documentation
+                    readme_url = f"https://raw.githubusercontent.com/{repo['full_name']}/main/README.md"
+                    
+                    candidate = {
+                        "url": repo["html_url"],
+                        "source": "github",
+                        "type": "repository",
+                        "title": repo["name"],
+                        "description": repo.get("description", ""),
+                        "stars": repo["stargazers_count"],
+                        "readme_url": readme_url
+                    }
+                    candidates.append(candidate)
+                    
+        except Exception as e:
+            self.logger.error("Failed to search GitHub", query=query, error=str(e))
+        
+        return candidates
+    
+    async def search_rapidapi(self, category: str) -> List[Dict[str, Any]]:
+        """Search RapidAPI marketplace"""
+        candidates = []
+        
+        try:
+            # RapidAPI doesn't have a public search API, so we scrape carefully
+            url = f"https://rapidapi.com/category/{category}"
+            
+            if await self.is_allowed_by_robots("https://rapidapi.com"):
+                response = await self.client.get(url)
+                
+                if response.status_code == 200:
+                    # Parse and extract API listings
+                    # This is simplified - real implementation would parse the page properly
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    
+                    # Look for API cards/links
+                    api_cards = soup.find_all("div", class_=re.compile(r"api-card|listing"))
+                    
+                    for card in api_cards[:10]:  # Limit to avoid overwhelming
+                        link = card.find("a", href=True)
+                        if link:
+                            candidate = {
+                                "url": urljoin("https://rapidapi.com", link["href"]),
+                                "source": "rapidapi",
+                                "type": "marketplace",
+                                "title": card.get_text(strip=True)[:100]
+                            }
+                            candidates.append(candidate)
+                            
+        except Exception as e:
+            self.logger.error("Failed to search RapidAPI", category=category, error=str(e))
+        
+        return candidates
+    
+    async def crawl_directory(self, url: str) -> List[Dict[str, Any]]:
+        """Crawl a directory site (like Kaggle datasets)"""
+        candidates = []
+        
+        try:
+            response = await self.client.get(url)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Look for dataset/API links
+            links = soup.find_all("a", href=re.compile(r"dataset|api|data"))
+            
+            for link in links[:20]:  # Limit
+                href = link.get("href", "")
+                if href:
+                    full_url = urljoin(url, href)
+                    candidate = {
+                        "url": full_url,
+                        "source": url,
+                        "type": "dataset",
+                        "title": link.get_text(strip=True)
+                    }
+                    candidates.append(candidate)
+                    
+        except Exception as e:
+            self.logger.error("Failed to crawl directory", url=url, error=str(e))
+        
+        return candidates
+    
+    async def get_github_trending(self) -> List[Dict[str, Any]]:
+        """Get trending GitHub repos related to crypto sentiment"""
+        # Simplified - would use GitHub trending API or scrape trending page
+        return await self.search_github("crypto sentiment created:>2024-01-01")
+    
+    async def get_product_hunt_apis(self) -> List[Dict[str, Any]]:
+        """Get recent API launches from Product Hunt"""
+        candidates = []
+        
+        # Product Hunt doesn't have easy API access without auth
+        # This is a placeholder for the real implementation
+        
+        return candidates
+    
+    async def search_reddit_recent(self) -> List[Dict[str, Any]]:
+        """Search recent Reddit posts for API announcements"""
+        candidates = []
+        
+        try:
+            # Reddit JSON API (no auth needed for public data)
+            subreddits = ["cryptocurrency", "algotrading", "cryptomarkets"]
+            
+            for subreddit in subreddits:
+                url = f"https://www.reddit.com/r/{subreddit}/search.json"
+                response = await self.client.get(
+                    url,
+                    params={
+                        "q": "sentiment API OR data feed",
+                        "sort": "new",
+                        "limit": 10,
+                        "restrict_sr": "true"
+                    }
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    for post in data.get("data", {}).get("children", []):
+                        post_data = post.get("data", {})
+                        
+                        # Extract URLs from post
+                        urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', post_data.get("selftext", ""))
+                        
+                        for url in urls:
+                            if "api" in url.lower() or "sentiment" in url.lower():
+                                candidate = {
+                                    "url": url,
+                                    "source": f"reddit/{subreddit}",
+                                    "type": "community",
+                                    "title": post_data.get("title", "")[:100]
+                                }
+                                candidates.append(candidate)
+                                
+        except Exception as e:
+            self.logger.error("Failed to search Reddit", error=str(e))
+        
+        return candidates
+    
+    async def probe_url(self, url: str) -> Optional[Dict[str, Any]]:
+        """Probe a URL to gather basic information"""
+        try:
+            response = await self.client.get(url, follow_redirects=True)
+            response.raise_for_status()
+            
+            # Determine content type
+            content_type = response.headers.get("content-type", "")
+            
+            candidate = {
+                "url": str(response.url),  # Final URL after redirects
+                "status_code": response.status_code,
+                "content_type": content_type,
+                "content_length": len(response.content)
+            }
+            
+            if "json" in content_type:
+                # Try to parse as JSON (might be OpenAPI)
+                try:
+                    data = response.json()
+                    if "openapi" in data or "swagger" in data:
+                        candidate["type"] = "openapi"
+                        candidate["title"] = data.get("info", {}).get("title", "")
+                        candidate["version"] = data.get("info", {}).get("version", "")
+                except:
+                    pass
+            
+            elif "html" in content_type:
+                # Parse HTML for metadata
+                soup = BeautifulSoup(response.text, "html.parser")
+                
+                title = soup.find("title")
+                if title:
+                    candidate["title"] = title.get_text(strip=True)
+                
+                description = soup.find("meta", {"name": "description"})
+                if description:
+                    candidate["description"] = description.get("content", "")
+                
+                candidate["type"] = "website"
+            
+            return candidate
+            
+        except Exception as e:
+            self.logger.error("Failed to probe URL", url=url, error=str(e))
+            return None
+    
+    async def probe_resource(self, url: str) -> Dict[str, Any]:
+        """Deep probe of a resource to extract detailed information"""
+        resource_data = {
+            "url": url,
+            "probed_at": asyncio.get_event_loop().time()
+        }
+        
+        try:
+            # Fetch main page
+            response = await self.client.get(url)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Extract basic info
+            resource_data["title"] = self.extract_title(soup)
+            resource_data["description"] = self.extract_description(soup)
+            
+            # Look for API documentation
+            api_docs = await self.find_api_documentation(url, soup)
+            if api_docs:
+                resource_data["api_docs"] = api_docs
+            
+            # Check for pricing information
+            pricing = await self.extract_pricing(url, soup)
+            if pricing:
+                resource_data["pricing"] = pricing
+            
+            # Check for authentication methods
+            auth = await self.extract_auth_methods(url, soup)
+            if auth:
+                resource_data["authentication"] = auth
+            
+            # Try to find example endpoints
+            endpoints = await self.extract_endpoints(url, soup)
+            if endpoints:
+                resource_data["endpoints"] = endpoints
+            
+            # Check for rate limits
+            rate_limits = await self.extract_rate_limits(url, soup)
+            if rate_limits:
+                resource_data["rate_limits"] = rate_limits
+            
+        except Exception as e:
+            self.logger.error("Failed to probe resource", url=url, error=str(e))
+            resource_data["error"] = str(e)
+        
+        return resource_data
+    
+    def extract_title(self, soup: BeautifulSoup) -> str:
+        """Extract page title"""
+        title = soup.find("title")
+        if title:
+            return title.get_text(strip=True)
+        
+        h1 = soup.find("h1")
+        if h1:
+            return h1.get_text(strip=True)
+        
+        return ""
+    
+    def extract_description(self, soup: BeautifulSoup) -> str:
+        """Extract page description"""
+        meta_desc = soup.find("meta", {"name": "description"})
+        if meta_desc:
+            return meta_desc.get("content", "")
+        
+        # Look for first paragraph
+        p = soup.find("p")
+        if p:
+            return p.get_text(strip=True)[:500]
+        
+        return ""
+    
+    async def find_api_documentation(self, base_url: str, soup: BeautifulSoup) -> Optional[Dict[str, Any]]:
+        """Find and extract API documentation"""
+        docs = {}
+        
+        # Look for documentation links
+        doc_links = soup.find_all("a", href=re.compile(r"doc|api|developer|guide", re.I))
+        
+        for link in doc_links[:5]:  # Limit to avoid too many requests
+            href = link.get("href", "")
+            if href:
+                full_url = urljoin(base_url, href)
+                docs[link.get_text(strip=True)] = full_url
+        
+        # Check for OpenAPI
+        openapi_url = await self.find_openapi_spec(base_url)
+        if openapi_url:
+            docs["openapi"] = openapi_url
+        
+        return docs if docs else None
+    
+    async def extract_pricing(self, base_url: str, soup: BeautifulSoup) -> Optional[Dict[str, Any]]:
+        """Extract pricing information"""
+        pricing = {}
+        
+        # Look for pricing page
+        pricing_link = soup.find("a", href=re.compile(r"pric|plan|tier", re.I))
+        if pricing_link:
+            pricing["url"] = urljoin(base_url, pricing_link.get("href", ""))
+        
+        # Look for pricing text
+        pricing_keywords = ["free", "trial", "$", "€", "plan", "tier", "quota"]
+        for keyword in pricing_keywords:
+            elements = soup.find_all(text=re.compile(keyword, re.I))
+            for elem in elements[:3]:
+                parent = elem.parent
+                if parent:
+                    text = parent.get_text(strip=True)[:200]
+                    if keyword not in pricing:
+                        pricing[keyword] = text
+        
+        return pricing if pricing else None
+    
+    async def extract_auth_methods(self, base_url: str, soup: BeautifulSoup) -> Optional[List[str]]:
+        """Extract authentication methods"""
+        auth_methods = set()
+        
+        # Common auth keywords
+        auth_keywords = [
+            "api key", "api_key", "apikey",
+            "oauth", "oauth2",
+            "bearer", "token",
+            "basic auth", "basic authentication",
+            "jwt", "json web token"
+        ]
+        
+        text = soup.get_text().lower()
+        
+        for keyword in auth_keywords:
+            if keyword in text:
+                if "api" in keyword:
+                    auth_methods.add("api_key")
+                elif "oauth" in keyword:
+                    auth_methods.add("oauth2")
+                elif "bearer" in keyword or "jwt" in keyword:
+                    auth_methods.add("bearer_token")
+                elif "basic" in keyword:
+                    auth_methods.add("basic_auth")
+        
+        return list(auth_methods) if auth_methods else None
+    
+    async def extract_endpoints(self, base_url: str, soup: BeautifulSoup) -> Optional[List[Dict[str, str]]]:
+        """Extract API endpoints"""
+        endpoints = []
+        
+        # Look for code blocks with URLs
+        code_blocks = soup.find_all(["code", "pre"])
+        
+        url_pattern = re.compile(r'(GET|POST|PUT|DELETE|PATCH)\s+(\/[\w\/\-{}]+)')
+        
+        for block in code_blocks:
+            text = block.get_text()
+            matches = url_pattern.findall(text)
+            
+            for method, path in matches:
+                endpoints.append({
+                    "method": method,
+                    "path": path
+                })
+        
+        # Look for endpoint documentation tables
+        tables = soup.find_all("table")
+        for table in tables:
+            # Simple heuristic: if table has "endpoint" or "method" in headers
+            headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
+            
+            if any(word in " ".join(headers) for word in ["endpoint", "method", "path", "url"]):
+                rows = table.find_all("tr")[1:]  # Skip header
+                
+                for row in rows[:10]:  # Limit
+                    cells = row.find_all("td")
+                    if len(cells) >= 2:
+                        endpoints.append({
+                            "description": cells[0].get_text(strip=True),
+                            "path": cells[1].get_text(strip=True)
+                        })
+        
+        return endpoints[:20] if endpoints else None  # Limit total
+    
+    async def extract_rate_limits(self, base_url: str, soup: BeautifulSoup) -> Optional[Dict[str, Any]]:
+        """Extract rate limit information"""
+        rate_limits = {}
+        
+        # Common rate limit patterns
+        patterns = [
+            r'(\d+)\s*requests?\s*per\s*(second|minute|hour|day)',
+            r'(\d+)\s*req/?(sec|min|hour|day)',
+            r'rate\s*limit[:\s]+(\d+)',
+            r'quota[:\s]+(\d+)',
+            r'(\d+)\s*calls?\s*per\s*(second|minute|hour|day)'
+        ]
+        
+        text = soup.get_text()
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.I)
+            for match in matches:
+                if len(match) == 2:
+                    value, unit = match
+                    rate_limits[f"per_{unit.lower()}"] = int(value)
+        
+        return rate_limits if rate_limits else None
+    
+    async def is_allowed_by_robots(self, url: str) -> bool:
+        """Check if URL is allowed by robots.txt"""
+        parsed = urlparse(url)
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        
+        # Cache robot parsers
+        if robots_url not in self.robot_parsers:
+            try:
+                response = await self.client.get(robots_url)
+                if response.status_code == 200:
+                    parser = RobotFileParser()
+                    parser.parse(response.text.splitlines())
+                    self.robot_parsers[robots_url] = parser
+                else:
+                    # No robots.txt means allowed
+                    return True
+            except:
+                # Error fetching robots.txt means we proceed cautiously
+                return True
+        
+        parser = self.robot_parsers.get(robots_url)
+        if parser:
+            return parser.can_fetch(self.settings.user_agent, url)
+        
+        return True
+    
+    async def get_last_sweep_time(self) -> Optional[float]:
+        """Get timestamp of last sweep from database"""
+        # This would query the database for the last successful sweep
+        # For now, return None to trigger full sweep
+        return None
+    
+    async def close(self):
+        """Clean up resources"""
+        await self.client.aclose()
+```
+
+```python
+# /agents/sentiment_registrar/src/discovery/heuristics.py
+"""
+Heuristics for identifying sentiment-related resources
+"""
+
+import re
+from typing import Dict, Any, List
+import structlog
+
+class SentimentHeuristics:
+    """Heuristics engine for sentiment resource detection"""
+    
+    def __init__(self, logger: structlog.BoundLogger):
+        self.logger = logger
+        
+        # Sentiment-specific keywords
+        self.sentiment_keywords = [
+            "sentiment", "emotion", "opinion", "mood",
+            "bullish", "bearish", "fear", "greed",
+            "social listening", "social mention",
+            "market psychology", "investor sentiment",
+            "crowd wisdom", "social signal"
+        ]
+        
+        # Crypto-specific keywords
+        self.crypto_keywords = [
+            "crypto", "cryptocurrency", "bitcoin", "btc",
+            "ethereum", "eth", "defi", "blockchain",
+            "altcoin", "token", "coin", "digital asset"
+        ]
+        
+        # NLP/ML indicators
+        self.nlp_keywords = [
+            "nlp", "natural language", "text analysis",
+            "vader", "textblob", "bert", "finbert",
+            "machine learning", "ml model", "ai",
+            "classification", "polarity", "score"
+        ]
+        
+        # Data source indicators
+        self.source_keywords = [
+            "twitter", "reddit", "telegram", "discord",
+            "news", "social media", "forum", "chat",
+            "real-time", "realtime", "stream", "feed"
+        ]
+        
+        # API indicators
+        self.api_keywords = [
+            "api", "rest", "graphql", "websocket",
+            "endpoint", "webhook", "sdk", "client",
+            "documentation", "developer", "integration"
+        ]
+    
+    async def is_sentiment_resource(self, candidate: Dict[str, Any]) -> bool:
+        """Determine if a candidate is likely a sentiment resource"""
+        score = 0
+        max_score = 100
+        
+        # Check URL
+        url = candidate.get("url", "").lower()
+        score += self.score_text(url, weight=15)
+        
+        # Check title
+        title = candidate.get("title", "").lower()
+        score += self.score_text(title, weight=25)
+        
+        # Check description
+        description = candidate.get("description", "").lower()
+        score += self.score_text(description, weight=20)
+        
+        # Check type
+        resource_type = candidate.get("type", "")
+        if resource_type in ["api", "openapi", "api_docs"]:
+            score += 10
+        
+        # Check for specific patterns
+        if self.has_sentiment_api_pattern(candidate):
+            score += 20
+        
+        # Check source credibility
+        source = candidate.get("source", "")
+        if any(s in source for s in ["github", "rapidapi", "kaggle"]):
+            score += 10
+        
+        # Threshold for acceptance
+        threshold = 40
+        is_sentiment = score >= threshold
+        
+        self.logger.debug(
+            "Heuristic evaluation",
+            url=candidate.get("url"),
+            score=score,
+            threshold=threshold,
+            is_sentiment=is_sentiment
+        )
+        
+        return is_sentiment
+    
+    def score_text(self, text: str, weight: int = 10) -> int:
+        """Score text based on keyword presence"""
+        if not text:
+            return 0
+        
+        score = 0
+        max_keyword_score = weight
+        
+        # Check sentiment keywords (highest weight)
+        sentiment_matches = sum(1 for kw in self.sentiment_keywords if kw in text)
+        if sentiment_matches > 0:
+            score += min(sentiment_matches * 3, max_keyword_score * 0.4)
+        
+        # Check crypto keywords
+        crypto_matches = sum(1 for kw in self.crypto_keywords if kw in text)
+        if crypto_matches > 0:
+            score += min(crypto_matches * 2, max_keyword_score * 0.3)
+        
+        # Check NLP keywords
+        nlp_matches = sum(1 for kw in self.nlp_keywords if kw in text)
+        if nlp_matches > 0:
+            score += min(nlp_matches * 2, max_keyword_score * 0.2)
+        
+        # Check source keywords
+        source_matches = sum(1 for kw in self.source_keywords if kw in text)
+        if source_matches > 0:
+            score += min(source_matches, max_keyword_score * 0.1)
+        
+        # Bonus for multiple category matches
+        categories_matched = sum([
+            sentiment_matches > 0,
+            crypto_matches > 0,
+            nlp_matches > 0,
+            source_matches > 0
+        ])
+        
+        if categories_matched >= 3:
+            score += max_keyword_score * 0.2
+        
+        return min(int(score), weight)
+    
+    def has_sentiment_api_pattern(self, candidate: Dict[str, Any]) -> bool:
+        """Check for specific sentiment API patterns"""
+        patterns = [
+            r'/sentiment',
+            r'/emotion',
+            r'/opinion',
+            r'/social',
+            r'/fear.*greed',
+            r'/market.*psychology',
+            r'/v\d+/sentiment',  # Versioned sentiment endpoint
+            r'sentiment\.(com|io|ai|api)',  # Sentiment domains
+        ]
+        
+        url = candidate.get("url", "")
+        
+        for pattern in patterns:
+            if re.search(pattern, url, re.I):
+                return True
+        
+        # Check endpoints if available
+        endpoints = candidate.get("endpoints", [])
+        for endpoint in endpoints:
+            path = endpoint.get("path", "")
+            for pattern in patterns:
+                if re.search(pattern, path, re.I):
+                    return True
+        
+        return False
+    
+    def extract_signals(self, resource_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract sentiment-specific signals from resource data"""
+        signals = {
+            "has_realtime": False,
+            "has_historical": False,
+            "has_nlp_model": False,
+            "has_social_sources": False,
+            "has_news_sources": False,
+            "has_crypto_focus": False,
+            "has_api": False,
+            "has_free_tier": False
+        }
+        
+        text = str(resource_data).lower()
+        
+        # Check for real-time capabilities
+        if any(kw in text for kw in ["real-time", "realtime", "stream", "websocket", "live"]):
+            signals["has_realtime"] = True
+        
+        # Check for historical data
+        if any(kw in text for kw in ["historical", "archive", "backtest", "past data"]):
+            signals["has_historical"] = True
+        
+        # Check for NLP models
+        if any(kw in text for kw in self.nlp_keywords):
+            signals["has_nlp_model"] = True
+        
+        # Check for social sources
+        if any(kw in text for kw in ["twitter", "reddit", "telegram", "discord", "social"]):
+            signals["has_social_sources"] = True
+        
+        # Check for news sources
+        if any(kw in text for kw in ["news", "article", "media", "press"]):
+            signals["has_news_sources"] = True
+        
+        # Check for crypto focus
+        crypto_count = sum(1 for kw in self.crypto_keywords if kw in text)
+        if crypto_count >= 2:
+            signals["has_crypto_focus"] = True
+        
+        # Check for API
+        if any(kw in text for kw in ["api", "endpoint", "rest", "graphql"]):
+            signals["has_api"] = True
+        
+        # Check for free tier
+        if any(kw in text for kw in ["free", "trial", "freemium", "no cost"]):
+            signals["has_free_tier"] = True
+        
+        return signals
+    
+    def categorize_resource(self, resource_data: Dict[str, Any]) -> List[str]:
+        """Categorize resource into subtypes"""
+        subtypes = []
+        text = str(resource_data).lower()
+        
+        # Check for news sentiment
+        if any(kw in text for kw in ["news", "article", "headline", "media"]):
+            subtypes.append("news")
+        
+        # Check for social sentiment
+        if any(kw in text for kw in ["social", "twitter", "reddit", "forum"]):
+            subtypes.append("social")
+        
+        # Check for on-chain sentiment
+        if any(kw in text for kw in ["onchain", "on-chain", "blockchain", "transaction"]):
+            subtypes.append("onchain")
+        
+        # Check for derivatives sentiment
+        if any(kw in text for kw in ["options", "futures", "derivatives", "perp"]):
+            subtypes.append("derivatives")
+        
+        # Check for crowd index
+        if any(kw in text for kw in ["index", "aggregate", "composite", "combined"]):
+            subtypes.append("crowd-index")
+        
+        # Check for alternative data
+        if any(kw in text for kw in ["alternative", "alt data", "satellite", "web traffic"]):
+            subtypes.append("alt-data")
+        
+        # Default to general if no specific type found
+        if not subtypes:
+            subtypes.append("general")
+        
+        return subtypes
+```
+
+```python
+# /agents/sentiment_registrar/src/evaluation/schema.py
+"""
+Pydantic models for POML resource schema
+"""
+
+from typing import List, Dict, Any, Optional, Union
+from datetime import datetime
+from pydantic import BaseModel, Field, HttpUrl, validator
+from enum import Enum
+
+class PricingModel(str, Enum):
+    FREE = "free"
+    FREEMIUM = "freemium"
+    PAID = "paid"
+    CUSTOM = "custom"
+
+class AuthMethod(str, Enum):
+    API_KEY = "api_key"
+    OAUTH2 = "oauth2"
+    BASIC = "basic_auth"
+    BEARER = "bearer_token"
+    NONE = "none"
+
+class ResourceSubtype(str, Enum):
+    NEWS = "news"
+    SOCIAL = "social"
+    ONCHAIN = "onchain"
+    DERIVATIVES = "derivatives"
+    CROWD_INDEX = "crowd-index"
+    ALT_DATA = "alt-data"
+
+class QuotaModel(BaseModel):
+    requests_per_minute: Optional[int] = None
+    requests_per_day: Optional[int] = None
+    requests_per_month: Optional[int] = None
+    concurrent_connections: Optional[int] = None
+
+class PlanModel(BaseModel):
+    name: str
+    monthly_price_usd: float
+    quota: QuotaModel
+    overage_policy: Optional[str] = None
+    features: Optional[List[str]] = None
+
+class AuthenticationModel(BaseModel):
+    methods: List[AuthMethod]
+    header_example: Optional[str] = None
+    key_location: Optional[str] = None
+    oauth_flow: Optional[str] = None
+
+class TermsModel(BaseModel):
+    tos_url: Optional[HttpUrl] = None
+    attribution_required: bool = False
+    caching_allowed: bool = True
+    redistribution_allowed: bool = False
+    pii_present: bool = False
+    gdpr_compliant: Optional[str] = None
+    data_licensing: Optional[str] = None
+    notes: Optional[str] = None
+
+class AccessModel(BaseModel):
+    pricing_model: PricingModel
+    plans: List[PlanModel]
+    authentication: AuthenticationModel
+    terms: TermsModel
+
+class CoverageModel(BaseModel):
+    assets: Dict[str, Any] = Field(default_factory=dict)
+    venues: List[str] = Field(default_factory=list)
+    sources: List[str] = Field(default_factory=list)
+    languages: List[str] = Field(default_factory=list)
+    regions: List[str] = Field(default_factory=list)
+
+class ScaleModel(BaseModel):
+    name: str
+    min: float
+    max: float
+    neutral_band: Optional[List[float]] = None
+
+class FieldModel(BaseModel):
+    name: str
+    type: str
+    description: Optional[str] = None
+    values: Optional[List[str]] = None
+    required: bool = False
+
+class AggregationModel(BaseModel):
+    methods: List[str]
+    windows: List[str]
+
+class HistoricalDepthModel(BaseModel):
+    earliest: Optional[str] = None
+    retention_policy_days: Optional[int] = None
+
+class DataModelConfig(BaseModel):
+    sentiment_granularity: List[str]
+    scale: ScaleModel
+    fields: List[FieldModel]
+    aggregation: AggregationModel
+    historical_depth: HistoricalDepthModel
+    update_frequency: str
+    latency_ms_p50: Optional[int] = None
+    latency_ms_p95: Optional[int] = None
+
+class EndpointParamModel(BaseModel):
+    name: str
+    type: str
+    example: Optional[str] = None
+    description: Optional[str] = None
+
+class RateLimitModel(BaseModel):
+    rpm: Optional[int] = None
+    burst: Optional[int] = None
+    daily: Optional[int] = None
+
+class ResponseModel(BaseModel):
+    format: str
+    success_example: Optional[str] = None
+    error_examples: Optional[List[Dict[str, Any]]] = None
+
+class EndpointModel(BaseModel):
+    id: str
+    method: str
+    path: str
+    description: Optional[str] = None
+    required_params: List[EndpointParamModel] = Field(default_factory=list)
+    optional_params: List[EndpointParamModel] = Field(default_factory=list)
+    rate_limit: Optional[RateLimitModel] = None
+    response: ResponseModel
+
+class HttpInterfaceModel(BaseModel):
+    base_url: HttpUrl
+    endpoints: List[EndpointModel]
+    headers: Optional[Dict[str, str]] = None
+
+class WebSocketInterfaceModel(BaseModel):
+    url: str
+    topics: List[str]
+    auth: str
+    message_examples: Dict[str, str]
+
+class InterfacesModel(BaseModel):
+    http: Optional[HttpInterfaceModel] = None
+    websocket: Optional[WebSocketInterfaceModel] = None
+    graphql: Optional[Dict[str, Any]] = None
+
+class SDKModel(BaseModel):
+    available: List[str]
+    examples: Dict[str, str]
+    package_managers: Optional[Dict[str, str]] = None
+
+class EvaluationModel(BaseModel):
+    last_checked: datetime
+    rubric_version: str = "1.0"
+    subscores: Dict[str, float]
+    total_score: float
+    notes: Optional[str] = None
+    warnings: Optional[List[str]] = None
+
+class LimitsModel(BaseModel):
+    pagination: Optional[str] = None
+    batch_max: Optional[int] = None
+    max_symbols_per_request: Optional[int] = None
+    max_concurrency_recommended: Optional[int] = None
+    retry_policy: Optional[str] = None
+    error_codes: Optional[List[Dict[str, str]]] = None
+    data_caps: Optional[Dict[str, Any]] = None
+
+class ComplianceModel(BaseModel):
+    robots_respected: bool = True
+    scraping_allowed: bool = False
+    redistribution_notes: Optional[str] = None
+    regulatory_compliance: Optional[List[str]] = None
+
+class SupportModel(BaseModel):
+    contact: Optional[str] = None
+    sla: Optional[str] = None
+    community: Optional[HttpUrl] = None
+    changelog_url: Optional[HttpUrl] = None
+    documentation_quality: Optional[str] = None
+
+class MetadataModel(BaseModel):
+    tags: List[str]
+    created_at: datetime
+    updated_at: datetime
+    version_semver: str
+    changelog: Optional[List[Dict[str, Any]]] = None
+
+class ResourceInfoModel(BaseModel):
+    id: str = Field(..., regex="^[a-z0-9-]+$")
+    name: str
+    category: str = "sentiment"
+    subtypes: List[ResourceSubtype]
+    homepage: HttpUrl
+    docs_url: Optional[HttpUrl] = None
+    openapi_url: Optional[HttpUrl] = None
+    status_page: Optional[HttpUrl] = None
+    logo_url: Optional[HttpUrl] = None
+    description: str
+
+class ResourceModel(BaseModel):
+    """Complete POML resource model"""
+    version: str = "1.0.0"
+    resource: ResourceInfoModel
+    access: AccessModel
+    coverage: CoverageModel
+    data_model: DataModelConfig
+    interfaces: InterfacesModel
+    sdk: Optional[SDKModel] = None
+    evaluation: EvaluationModel
+    limits: Optional[LimitsModel] = None
+    compliance: Optional[ComplianceModel] = None
+    support: Optional[SupportModel] = None
+    metadata: MetadataModel
+    
+    @validator("resource")
+    def validate_resource_id(cls, v):
+        """Ensure resource ID is valid"""
+        if not v.id or not v.id.replace("-", "").isalnum():
+            raise ValueError("Resource ID must be kebab-case alphanumeric")
+        return v
+    
+    @validator("evaluation")
+    def validate_score(cls, v):
+        """Ensure score is within valid range"""
+        if not 0 <= v.total_score <= 100:
+            raise ValueError("Total score must be between 0 and 100")
+        return v
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat(),
+            HttpUrl: str
+        }
+```
+
+```python
+# /agents/sentiment_registrar/src/evaluation/scoring.py
+"""
+Scoring engine for evaluating sentiment resources
+"""
+
+from typing import Dict, Any
+import structlog
+
+class ScoringEngine:
+    """Scores resources based on weighted rubric"""
+    
+    def __init__(self, weights: Dict[str, float], logger: structlog.BoundLogger):
+        self.weights = weights
+        self.logger = logger
+        
+        # Validate weights sum to 1.0
+        total_weight = sum(weights.values())
+        if abs(total_weight - 1.0) > 0.01:
+            logger.warning("Weights don't sum to 1.0", total=total_weight)
+            # Normalize weights
+            self.weights = {k: v/total_weight for k, v in weights.items()}
+    
+    async def score_resource(self, resource: Dict[str, Any]) -> Dict[str, Any]:
+        """Score a resource based on rubric"""
+        subscores = {}
+        notes = []
+        
+        # Coverage score (25%)
+        coverage_score = self.score_coverage(resource)
+        subscores["coverage"] = coverage_score
+        
+        # Freshness score (15%)
+        freshness_score = self.score_freshness(resource)
+        subscores["freshness"] = freshness_score
+        
+        # Quality/Methodology score (20%)
+        quality_score = self.score_quality(resource)
+        subscores["quality"] = quality_score
+        
+        # Access score (10%)
+        access_score = self.score_access(resource)
+        subscores["access"] = access_score
+        
+        # Compliance score (10%)
+        compliance_score = self.score_compliance(resource)
+        subscores["compliance"] = compliance_score
+        
+        # Integrability score (10%)
+        integrability_score = self.score_integrability(resource)
+        subscores["integrability"] = integrability_score
+        
+        # Stability score (10%)
+        stability_score = self.score_stability(resource)
+        subscores["stability"] = stability_score
+        
+        # Calculate weighted total
+        total = sum(
+            subscores[key] * self.weights.get(key, 0)
+            for key in subscores
+        )
+        
+        # Add notes based on scores
+        if coverage_score < 15:
+            notes.append("Limited coverage of assets or sources")
+        if freshness_score < 10:
+            notes.append("Update frequency may be insufficient for real-time needs")
+        if quality_score < 15:
+            notes.append("Methodology transparency could be improved")
+        if access_score < 5:
+            notes.append("Limited free tier or high pricing")
+        
+        # Add positive notes
+        if total > 85:
+            notes.append("Excellent overall resource for crypto sentiment")
+        elif total > 70:
+            notes.append("Good resource with solid capabilities")
+        
+        return {
+            "subscores": subscores,
+            "total": round(total, 1),
+            "notes": ". ".join(notes) if notes else ""
+        }
+    
+    def score_coverage(self, resource: Dict[str, Any]) -> float:
+        """Score coverage (max 25 points)"""
+        score = 0
+        coverage = resource.get("coverage", {})
+        
+        # Asset coverage (10 points)
+        assets = coverage.get("assets", {})
+        universe_size = assets.get("universe_size", 0)
+        
+        if universe_size >= 2000:
+            score += 10
+        elif universe_size >= 1000:
+            score += 8
+        elif universe_size >= 500:
+            score += 6
+        elif universe_size >= 100:
+            score += 4
+        elif universe_size >= 50:
+            score += 2
+        
+        # Source diversity (8 points)
+        sources = coverage.get("sources", [])
+        source_score = min(len(sources) * 2, 8)
+        score += source_score
+        
+        # Language support (4 points)
+        languages = coverage.get("languages", [])
+        if len(languages) >= 5:
+            score += 4
+        elif len(languages) >= 3:
+            score += 3
+        elif len(languages) >= 2:
+            score += 2
+        elif len(languages) >= 1:
+            score += 1
+        
+        # Regional coverage (3 points)
+        regions = coverage.get("regions", [])
+        if "global" in regions or len(regions) >= 4:
+            score += 3
+        elif len(regions) >= 2:
+            score += 2
+        elif len(regions) >= 1:
+            score += 1
+        
+        return min(score, 25)
+    
+    def score_freshness(self, resource: Dict[str, Any]) -> float:
+        """Score freshness (max 15 points)"""
+        score = 0
+        data_model = resource.get("data_model", {})
+        
+        # Update frequency (10 points)
+        frequency = data_model.get("update_frequency", "").lower()
+        
+        if "realtime" in frequency or "subsecond" in frequency:
+            score += 10
+        elif "1s" in frequency or "second" in frequency:
+            score += 9
+        elif "1m" in frequency or "minute" in frequency:
+            score += 7
+        elif "5m" in frequency:
+            score += 6
+        elif "hourly" in frequency:
+            score += 4
+        elif "daily" in frequency:
+            score += 2
+        
+        # Latency (5 points)
+        latency_p50 = data_model.get("latency_ms_p50", float('inf'))
+        
+        if latency_p50 < 100:
+            score += 5
+        elif latency_p50 < 500:
+            score += 4
+        elif latency_p50 < 1000:
+            score += 3
+        elif latency_p50 < 5000:
+            score += 2
+        elif latency_p50 < 10000:
+            score += 1
+        
+        return min(score, 15)
+    
+    def score_quality(self, resource: Dict[str, Any]) -> float:
+        """Score quality/methodology (max 20 points)"""
+        score = 0
+        data_model = resource.get("data_model", {})
+        
+        # Methodology transparency (8 points)
+        scale = data_model.get("scale", {})
+        if scale.get("name"):
+            score += 4
+            if scale.get("name") in ["vader", "finbert", "bert"]:
+                score += 4  # Known good models
+            elif scale.get("name") != "custom":
+                score += 2  # Named methodology
+        
+        # Granularity options (4 points)
+        granularity = data_model.get("sentiment_granularity", [])
+        score += min(len(granularity), 4)
+        
+        # Field richness (4 points)
+        fields = data_model.get("fields", [])
+        important_fields = ["score", "confidence", "source", "timestamp"]
+        fields_present = sum(1 for f in fields if f.get("name") in important_fields)
+        score += fields_present
+        
+        # Aggregation methods (4 points)
+        aggregation = data_model.get("aggregation", {})
+        methods = aggregation.get("methods", [])
+        score += min(len(methods), 4)
+        
+        return min(score, 20)
+    
+    def score_access(self, resource: Dict[str, Any]) -> float:
+        """Score access (max 10 points)"""
+        score = 0
+        access = resource.get("access", {})
+        
+        # Pricing model (5 points)
+        pricing_model = access.get("pricing_model", "")
+        
+        if pricing_model == "free":
+            score += 5
+        elif pricing_model == "freemium":
+            score += 4
+            # Check free tier generosity
+            plans = access.get("plans", [])
+            free_plan = next((p for p in plans if p.get("monthly_price_usd", 0) == 0), None)
+            if free_plan:
+                quota = free_plan.get("quota", {})
+                if quota.get("requests_per_day", 0) >= 5000:
+                    score += 1
+        elif pricing_model == "paid":
+            # Check if reasonably priced
+            plans = access.get("plans", [])
+            if plans:
+                min_price = min(p.get("monthly_price_usd", float('inf')) for p in plans)
+                if min_price < 50:
+                    score += 3
+                elif min_price < 100:
+                    score += 2
+                elif min_price < 500:
+                    score += 1
+        
+        # Authentication simplicity (3 points)
+        auth = access.get("authentication", {})
+        methods = auth.get("methods", [])
+        
+        if "none" in methods:
+            score += 3
+        elif "api_key" in methods:
+            score += 2
+        elif methods:
+            score += 1
+        
+        # Terms flexibility (2 points)
+        terms = access.get("terms", {})
+        if terms.get("caching_allowed"):
+            score += 1
+        if not terms.get("attribution_required"):
+            score += 1
+        
+        return min(score, 10)
+    
+    def score_compliance(self, resource: Dict[str, Any]) -> float:
+        """Score compliance (max 10 points)"""
+        score = 0
+        
+        # Terms clarity (4 points)
+        terms = resource.get("access", {}).get("terms", {})
+        if terms.get("tos_url"):
+            score += 2
+        if terms.get("gdpr_compliant") == "declared":
+            score += 2
+        
+        # Data licensing (3 points)
+        licensing = terms.get("data_licensing", "")
+        if licensing == "open":
+            score += 3
+        elif licensing == "mixed":
+            score += 2
+        elif licensing:
+            score += 1
+        
+        # Compliance info (3 points)
+        compliance = resource.get("compliance", {})
+        if compliance.get("robots_respected", True):
+            score += 1
+        if compliance.get("redistribution_notes"):
+            score += 1
+        if compliance.get("regulatory_compliance"):
+            score += 1
+        
+        return min(score, 10)
+    
+    def score_integrability(self, resource: Dict[str, Any]) -> float:
+        """Score integrability (max 10 points)"""
+        score = 0
+        
+        # Documentation (3 points)
+        if resource.get("resource", {}).get("docs_url"):
+            score += 2
+        if resource.get("resource", {}).get("openapi_url"):
+            score += 1
+        
+        # Interfaces (3 points)
+        interfaces = resource.get("interfaces", {})
+        if interfaces.get("http"):
+            score += 1
+        if interfaces.get("websocket"):
+            score += 2  # Real-time capability
+        
+        # SDK availability (2 points)
+        sdk = resource.get("sdk", {})
+        available = sdk.get("available", [])
+        score += min(len(available), 2)
+        
+        # Examples (2 points)
+        if sdk.get("examples"):
+            score += 2
+        
+        return min(score, 10)
+    
+    def score_stability(self, resource: Dict[str, Any]) -> float:
+        """Score stability (max 10 points)"""
+        score = 5  # Start at neutral
+        
+        # Status page (2 points)
+        if resource.get("resource", {}).get("status_page"):
+            score += 2
+        
+        # Support quality (3 points)
+        support = resource.get("support", {})
+        if support.get("sla"):
+            score += 1
+        if support.get("contact"):
+            score += 1
+        if support.get("community"):
+            score += 1
+        
+        # Error handling (2 points)
+        limits = resource.get("limits", {})
+        if limits.get("retry_policy"):
+            score += 1
+        if limits.get("error_codes"):
+            score += 1
+        
+        # Historical depth indicates maturity
+        historical = resource.get("data_model", {}).get("historical_depth", {})
+        if historical.get("earliest"):
+            try:
+                # If they have data from before 2020, likely stable
+                year = int(historical["earliest"][:4])
+                if year < 2020:
+                    score += 1
+            except:
+                pass
+        
+        return min(score, 10)
+```
+
+```python
+# /agents/sentiment_registrar/src/evaluation/validators.py
+"""
+POML validation and linting
+"""
+
+import json
+from typing import Dict, Any, List, Optional
+from pathlib import Path
+import jsonschema
+import structlog
+import yaml
+
+class POMLValidator:
+    """Validates POML resources against schema"""
+    
+    def __init__(self, logger: structlog.BoundLogger):
+        self.logger = logger
+        self.schema = self.load_schema()
+    
+    def load_schema(self) -> Dict[str, Any]:
+        """Load POML JSON Schema"""
+        # Define schema inline for completeness
+        return {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "POML Resource Schema",
+            "type": "object",
+            "required": ["version", "resource", "access", "coverage", "data_model", "interfaces", "evaluation", "metadata"],
+            "properties": {
+                "version": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                },
+                "resource": {
+                    "type": "object",
+                    "required": ["id", "name", "category", "subtypes", "homepage", "description"],
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9-]+$"
+                        },
+                        "name": {"type": "string"},
+                        "category": {"type": "string", "enum": ["sentiment"]},
+                        "subtypes": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["news", "social", "onchain", "derivatives", "crowd-index", "alt-data"]
+                            }
+                        },
+                        "homepage": {"type": "string", "format": "uri"},
+                        "docs_url": {"type": ["string", "null"], "format": "uri"},
+                        "openapi_url": {"type": ["string", "null"], "format": "uri"},
+                        "status_page": {"type": ["string", "null"], "format": "uri"},
+                        "logo_url": {"type": ["string", "null"], "format": "uri"},
+                        "description": {"type": "string"}
+                    }
+                },
+                "access": {
+                    "type": "object",
+                    "required": ["pricing_model", "plans", "authentication", "terms"],
+                    "properties": {
+                        "pricing_model": {
+                            "type": "string",
+                            "enum": ["free", "freemium", "paid", "custom"]
+                        },
+                        "plans": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["name", "monthly_price_usd", "quota"],
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "monthly_price_usd": {"type": "number"},
+                                    "quota": {
+                                        "type": "object",
+                                        "properties": {
+                                            "requests_per_minute": {"type": ["integer", "null"]},
+                                            "requests_per_day": {"type": ["integer", "null"]},
+                                            "requests_per_month": {"type": ["integer", "null"]},
+                                            "concurrent_connections": {"type": ["integer", "null"]}
+                                        }
+                                    },
+                                    "overage_policy": {"type": ["string", "null"]}
+                                }
+                            }
+                        },
+                        "authentication": {
+                            "type": "object",
+                            "required": ["methods"],
+                            "properties": {
+                                "methods": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["api_key", "oauth2", "basic_auth", "bearer_token", "none"]
+                                    }
+                                },
+                                "header_example": {"type": ["string", "null"]},
+                                "key_location": {"type": ["string", "null"]}
+                            }
+                        },
+                        "terms": {
+                            "type": "object",
+                            "properties": {
+                                "tos_url": {"type": ["string", "null"], "format": "uri"},
+                                "attribution_required": {"type": "boolean"},
+                                "caching_allowed": {"type": "boolean"},
+                                "redistribution_allowed": {"type": "boolean"},
+                                "pii_present": {"type": "boolean"},
+                                "gdpr_compliant": {"type": ["string", "null"]},
+                                "data_licensing": {"type": ["string", "null"]},
+                                "notes": {"type": ["string", "null"]}
+                            }
+                        }
+                    }
+                },
+                "coverage": {
+                    "type": "object",
+                    "properties": {
+                        "assets": {"type": "object"},
+                        "venues": {"type": "array", "items": {"type": "string"}},
+                        "sources": {"type": "array", "items": {"type": "string"}},
+                        "languages": {"type": "array", "items": {"type": "string"}},
+                        "regions": {"type": "array", "items": {"type": "string"}}
+                    }
+                },
+                "data_model": {
+                    "type": "object",
+                    "required": ["sentiment_granularity", "scale", "fields"],
+                    "properties": {
+                        "sentiment_granularity": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "scale": {
+                            "type": "object",
+                            "required": ["name", "min", "max"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "min": {"type": "number"},
+                                "max": {"type": "number"},
+                                "neutral_band": {
+                                    "type": ["array", "null"],
+                                    "items": {"type": "number"}
+                                }
+                            }
+                        },
+                        "fields": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["name", "type"],
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "type": {"type": "string"},
+                                    "description": {"type": ["string", "null"]},
+                                    "values": {"type": ["array", "null"]}
+                                }
+                            }
+                        },
+                        "aggregation": {"type": ["object", "null"]},
+                        "historical_depth": {"type": ["object", "null"]},
+                        "update_frequency": {"type": ["string", "null"]},
+                        "latency_ms_p50": {"type": ["integer", "null"]},
+                        "latency_ms_p95": {"type": ["integer", "null"]}
+                    }
+                },
+                "interfaces": {
+                    "type": "object",
+                    "properties": {
+                        "http": {"type": ["object", "null"]},
+                        "websocket": {"type": ["object", "null"]},
+                        "graphql": {"type": ["object", "null"]}
+                    }
+                },
+                "evaluation": {
+                    "type": "object",
+                    "required": ["last_checked", "rubric_version", "subscores", "total_score"],
+                    "properties": {
+                        "last_checked": {"type": "string"},
+                        "rubric_version": {"type": "string"},
+                        "subscores": {"type": "object"},
+                        "total_score": {"type": "number", "minimum": 0, "maximum": 100},
+                        "notes": {"type": ["string", "null"]}
+                    }
+                },
+                "metadata": {
+                    "type": "object",
+                    "required": ["tags", "created_at", "updated_at", "version_semver"],
+                    "properties": {
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "created_at": {"type": "string"},
+                        "updated_at": {"type": "string"},
+                        "version_semver": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"}
+                    }
+                }
+            }
+        }
+    
+    def validate_poml(self, resource: Dict[str, Any]) -> bool:
+        """Validate a POML resource against schema"""
+        try:
+            jsonschema.validate(instance=resource, schema=self.schema)
+            
+            # Additional business logic validation
+            warnings = self.lint_resource(resource)
+            
+            if warnings:
+                self.logger.warning(
+                    "POML validation warnings",
+                    resource_id=resource.get("resource", {}).get("id"),
+                    warnings=warnings
+                )
+            
+            return True
+            
+        except jsonschema.ValidationError as e:
+            self.logger.error(
+                "POML validation failed",
+                resource_id=resource.get("resource", {}).get("id"),
+                error=str(e),
+                path=list(e.absolute_path)
+            )
+            return False
+    
+    def lint_resource(self, resource: Dict[str, Any]) -> List[str]:
+        """Lint resource for best practices and consistency"""
+        warnings = []
+        
+        # Check for contradictory terms
+        terms = resource.get("access", {}).get("terms", {})
+        
+        if terms.get("redistribution_allowed") and terms.get("data_licensing") == "proprietary":
+            if not terms.get("notes"):
+                warnings.append("Redistribution allowed but data is proprietary - add clarification in notes")
+        
+        if not terms.get("caching_allowed") and not terms.get("notes"):
+            warnings.append("Caching not allowed - consider adding explanation in notes")
+        
+        # Check for missing recommended fields
+        if not resource.get("resource", {}).get("docs_url"):
+            warnings.append("No documentation URL provided")
+        
+        if not resource.get("resource", {}).get("openapi_url"):
+            http_interface = resource.get("interfaces", {}).get("http")
+            if http_interface and len(http_interface.get("endpoints", [])) > 3:
+                warnings.append("Multiple endpoints but no OpenAPI specification")
+        
+        # Check for incomplete coverage info
+        coverage = resource.get("coverage", {})
+        if not coverage.get("assets", {}).get("symbols_supported") and not coverage.get("assets", {}).get("universe_size"):
+            warnings.append("Asset coverage not specified")
+        
+        # Check for missing examples
+        sdk = resource.get("sdk", {})
+        if sdk.get("available") and not sdk.get("examples"):
+            warnings.append("SDKs available but no examples provided")
+        
+        # Check for incomplete rate limit info
+        interfaces = resource.get("interfaces", {})
+        if interfaces.get("http"):
+            for endpoint in interfaces["http"].get("endpoints", []):
+                if not endpoint.get("rate_limit"):
+                    warnings.append(f"No rate limit specified for endpoint: {endpoint.get('id')}")
+        
+        # Check evaluation freshness
+        import datetime
+        last_checked = resource.get("evaluation", {}).get("last_checked")
+        if last_checked:
+            try:
+                checked_date = datetime.datetime.fromisoformat(last_checked.replace("Z", "+00:00"))
+                age_days = (datetime.datetime.now(datetime.timezone.utc) - checked_date).days
+                if age_days > 30:
+                    warnings.append(f"Evaluation is {age_days} days old - consider re-evaluating")
+            except:
+                pass
+        
+        # Check for low scores without notes
+        total_score = resource.get("evaluation", {}).get("total_score", 0)
+        notes = resource.get("evaluation", {}).get("notes", "")
+        
+        if total_score < 50 and len(notes) < 50:
+            warnings.append("Low score but insufficient explanation in notes")
+        
+        return warnings
+    
+    def validate_file(self, file_path: Path) -> bool:
+        """Validate a POML file"""
+        try:
+            with open(file_path, "r") as f:
+                if file_path.suffix in [".yaml", ".yml", ".poml"]:
+                    resource = yaml.safe_load(f)
+                else:
+                    resource = json.load(f)
+            
+            return self.validate_poml(resource)
+            
+        except Exception as e:
+            self.logger.error(
+                "Failed to validate file",
+                file_path=str(file_path),
+                error=str(e)
+            )
+            return False
+    
+    def validate_directory(self, directory: Path) -> Dict[str, bool]:
+        """Validate all POML files in a directory"""
+        results = {}
+        
+        for file_path in directory.glob("*.poml"):
+            results[file_path.name] = self.validate_file(file_path)
+        
+        return results
+```
+
+```python
+# /agents/sentiment_registrar/src/evaluation/normalizers.py
+"""
+Normalizers for converting raw data to POML format
+"""
+
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
+import re
+import structlog
+
+class ResourceNormalizer:
+    """Normalizes raw resource data to POML schema"""
+    
+    def __init__(self, logger: structlog.BoundLogger):
+        self.logger = logger
+    
+    async def normalize(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize raw resource data to POML format"""
+        
+        # Start with base structure
+        resource = {
+            "version": "1.0.0",
+            "resource": self.normalize_resource_info(raw_data),
+            "access": self.normalize_access(raw_data),
+            "coverage": self.normalize_coverage(raw_data),
+            "data_model": self.normalize_data_model(raw_data),
+            "interfaces": self.normalize_interfaces(raw_data),
+            "sdk": self.normalize_sdk(raw_data),
+            "evaluation": {
+                "last_checked": datetime.now(timezone.utc).isoformat(),
+                "rubric_version": "1.0",
+                "subscores": {},
+                "total_score": 0,
+                "notes": ""
+            },
+            "limits": self.normalize_limits(raw_data),
+            "compliance": self.normalize_compliance(raw_data),
+            "support": self.normalize_support(raw_data),
+            "metadata": self.normalize_metadata(raw_data)
+        }
+        
+        return resource
+    
+    def normalize_resource_info(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize basic resource information"""
+        url = raw_data.get("url", "")
+        
+        # Generate ID from URL
+        resource_id = self.generate_resource_id(url)
+        
+        # Extract name from title or URL
+        name = raw_data.get("title", "")
+        if not name:
+            # Try to extract from URL
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            name = parsed.netloc.replace("www.", "").replace(".com", "").replace(".io", "")
+            name = name.title()
+        
+        return {
+            "id": resource_id,
+            "name": name,
+            "category": "sentiment",
+            "subtypes": self.extract_subtypes(raw_data),
+            "homepage": url,
+            "docs_url": self.find_docs_url(raw_data),
+            "openapi_url": raw_data.get("api_docs", {}).get("openapi"),
+            "status_page": None,  # Would need to probe for this
+            "logo_url": None,  # Would need to extract from page
+            "description": raw_data.get("description", "Crypto sentiment data provider")
+        }
+    
+    def generate_resource_id(self, url: str) -> str:
+        """Generate a kebab-case ID from URL"""
+        from urllib.parse import urlparse
+        
+        parsed = urlparse(url)
+        domain = parsed.netloc.replace("www.", "")
+        
+        # Remove TLD
+        parts = domain.split(".")
+        if len(parts) > 1:
+            domain = parts[0]
+        
+        # Convert to kebab-case
+        resource_id = re.sub(r'[^a-z0-9]+', '-', domain.lower())
+        resource_id = resource_id.strip('-')
+        
+        return resource_id
+    
+    def extract_subtypes(self, raw_data: Dict[str, Any]) -> List[str]:
+        """Extract resource subtypes from raw data"""
+        subtypes = []
+        text = str(raw_data).lower()
+        
+        if any(kw in text for kw in ["news", "article", "headline"]):
+            subtypes.append("news")
+        
+        if any(kw in text for kw in ["twitter", "reddit", "social"]):
+            subtypes.append("social")
+        
+        if any(kw in text for kw in ["onchain", "blockchain", "transaction"]):
+            subtypes.append("onchain")
+        
+        if not subtypes:
+            subtypes.append("social")  # Default
+        
+        return subtypes
+    
+    def find_docs_url(self, raw_data: Dict[str, Any]) -> Optional[str]:
+        """Find documentation URL"""
+        api_docs = raw_data.get("api_docs", {})
+        
+        for key, url in api_docs.items():
+            if "doc" in key.lower():
+                return url
+        
+        # Check if there's a docs link in the raw data
+        if "docs_url" in raw_data:
+            return raw_data["docs_url"]
+        
+        return None
+    
+    def normalize_access(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize access information"""
+        pricing = raw_data.get("pricing", {})
+        auth = raw_data.get("authentication", [])
+        
+        # Determine pricing model
+        pricing_model = "paid"  # Default
+        if any(kw in str(pricing).lower() for kw in ["free", "trial"]):
+            if "$" in str(pricing) or "€" in str(pricing):
+                pricing_model = "freemium"
+            else:
+                pricing_model = "free"
+        
+        # Create plans
+        plans = []
+        
+        if pricing_model in ["free", "freemium"]:
+            plans.append({
+                "name": "Free",
+                "monthly_price_usd": 0,
+                "quota": {
+                    "requests_per_minute": 30,
+                    "requests_per_day": 1000
+                },
+                "overage_policy": "429"
+            })
+        
+        if pricing_model in ["freemium", "paid"]:
+            plans.append({
+                "name": "Pro",
+                "monthly_price_usd": 99,  # Default estimate
+                "quota": {
+                    "requests_per_minute": 120,
+                    "requests_per_day": 100000
+                },
+                "overage_policy": "bill"
+            })
+        
+        # Normalize auth methods
+        auth_methods = []
+        if not auth:
+            auth_methods = ["api_key"]  # Most common
+        else:
+            for method in auth:
+                if "api" in method.lower():
+                    auth_methods.append("api_key")
+                elif "oauth" in method.lower():
+                    auth_methods.append("oauth2")
+                elif "bearer" in method.lower():
+                    auth_methods.append("bearer_token")
+        
+        return {
+            "pricing_model": pricing_model,
+            "plans": plans,
+            "authentication": {
+                "methods": auth_methods,
+                "header_example": "Authorization: Bearer <token>" if "bearer_token" in auth_methods else "X-API-Key: <key>",
+                "key_location": "header"
+            },
+            "terms": {
+                "tos_url": pricing.get("url"),
+                "attribution_required": False,  # Conservative default
+                "caching_allowed": True,
+                "redistribution_allowed": False,
+                "pii_present": False,
+                "gdpr_compliant": "unknown",
+                "data_licensing": "proprietary",
+                "notes": None
+            }
+        }
+    
+    def normalize_coverage(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize coverage information"""
+        return {
+            "assets": {
+                "symbols_supported": [],  # Would need to probe API
+                "universe_size": 100  # Conservative estimate
+            },
+            "venues": [],
+            "sources": self.extract_sources(raw_data),
+            "languages": ["en"],  # Default
+            "regions": ["global"]
+        }
+    
+    def extract_sources(self, raw_data: Dict[str, Any]) -> List[str]:
+        """Extract data sources"""
+        sources = []
+        text = str(raw_data).lower()
+        
+        source_map = {
+            "twitter": "twitter",
+            "reddit": "reddit",
+            "telegram": "telegram",
+            "discord": "discord",
+            "news": "news",
+            "blog": "blogs",
+            "forum": "forums"
+        }
+        
+        for keyword, source in source_map.items():
+            if keyword in text:
+                sources.append(source)
+        
+        return sources if sources else ["social"]
+    
+    def normalize_data_model(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize data model information"""
+        return {
+            "sentiment_granularity": ["ticker", "document"],
+            "scale": {
+                "name": "custom",
+                "min": -1,
+                "max": 1,
+                "neutral_band": [-0.1, 0.1]
+            },
+            "fields": [
+                {"name": "score", "type": "float", "description": "Sentiment score"},
+                {"name": "symbol", "type": "string", "description": "Asset symbol"},
+                {"name": "timestamp", "type": "datetime", "description": "Data timestamp"}
+            ],
+            "aggregation": {
+                "methods": ["mean"],
+                "windows": ["1h", "24h"]
+            },
+            "historical_depth": {
+                "earliest": "2020-01-01",
+                "retention_policy_days": 365
+            },
+            "update_frequency": "hourly",
+            "latency_ms_p50": 1000,
+            "latency_ms_p95": 5000
+        }
+    
+    def normalize_interfaces(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize interface information"""
+        interfaces = {}
+        
+        # Extract endpoints if available
+        endpoints_raw = raw_data.get("endpoints", [])
+        
+        if endpoints_raw or raw_data.get("url"):
+            base_url = raw_data.get("url", "https://api.example.com")
+            
+            endpoints = []
+            for i, ep in enumerate(endpoints_raw[:5]):  # Limit to 5
+                endpoint = {
+                    "id": f"endpoint_{i}",
+                    "method": ep.get("method", "GET"),
+                    "path": ep.get("path", "/sentiment"),
+                    "required_params": [],
+                    "optional_params": [],
+                    "rate_limit": {
+                        "rpm": 60
+                    },
+                    "response": {
+                        "format": "json",
+                        "success_example": None
+                    }
+                }
+                endpoints.append(endpoint)
+            
+            # Add default endpoint if none found
+            if not endpoints:
+                endpoints.append({
+                    "id": "get_sentiment",
+                    "method": "GET",
+                    "path": "/api/sentiment",
+                    "required_params": [
+                        {"name": "symbol", "type": "string", "example": "BTC"}
+                    ],
+                    "optional_params": [],
+                    "rate_limit": {"rpm": 60},
+                    "response": {
+                        "format": "json",
+                        "success_example": '{"symbol":"BTC","score":0.5}'
+                    }
+                })
+            
+            interfaces["http"] = {
+                "base_url": base_url,
+                "endpoints": endpoints
+            }
+        
+        return interfaces
+    
+    def normalize_sdk(self, raw_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Normalize SDK information"""
+        # Check if SDKs are mentioned
+        text = str(raw_data).lower()
+        
+        available = []
+        if "python" in text or "pip" in text:
+            available.append("python")
+        if "javascript" in text or "npm" in text:
+            available.append("javascript")
+        if "java" in text:
+            available.append("java")
+        
+        if not available:
+            return None
+        
+        return {
+            "available": available,
+            "examples": {}
+        }
+    
+    def normalize_limits(self, raw_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Normalize rate limits and constraints"""
+        rate_limits = raw_data.get("rate_limits", {})
+        
+        if not rate_limits:
+            return None
+        
+        limits = {
+            "pagination": "page",
+            "batch_max": 100,
+            "max_symbols_per_request": 10,
+            "max_concurrency_recommended": 2,
+            "retry_policy": "exponential_backoff",
+            "error_codes": [],
+            "data_caps": {}
+        }
+        
+        # Extract from rate_limits
+        for key, value in rate_limits.items():
+            if "minute" in key:
+                limits["requests_per_minute"] = value
+            elif "hour" in key:
+                limits["requests_per_hour"] = value
+            elif "day" in key:
+                limits["requests_per_day"] = value
+        
+        return limits
+    
+    def normalize_compliance(self, raw_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Normalize compliance information"""
+        return {
+            "robots_respected": True,
+            "scraping_allowed": False,
+            "redistribution_notes": None
+        }
+    
+    def normalize_support(self, raw_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Normalize support information"""
+        return {
+            "contact": None,
+            "sla": None,
+            "community": None,
+            "changelog_url": None
+        }
+    
+    def normalize_metadata(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize metadata"""
+        now = datetime.now(timezone.utc).isoformat()
+        
+        return {
+            "tags": ["crypto", "sentiment", "api"],
+            "created_at": now,
+            "updated_at": now,
+            "version_semver": "1.0.0"
+        }
+```
+
+```python
+# /agents/sentiment_registrar/src/emitters/poml_writer.py
+"""
+POML file writer and version manager
+"""
+
+from pathlib import Path
+from typing import Dict, Any, Optional
+import yaml
+import json
+from datetime import datetime, timezone
+import structlog
+import semantic_version
+
+class POMLWriter:
+    """Writes and manages POML resource files"""
+    
+    def __init__(self, settings, logger: structlog.BoundLogger):
+        self.settings = settings
+        self.logger = logger
+        self.sources_path = settings.sources_path
+        
+        # Ensure directory exists
+        self.sources_path.mkdir(parents=True, exist_ok=True)
+    
+    async def write_resource(self, resource: Dict[str, Any]) -> Path:
+        """Write or update a POML resource file"""
+        resource_id = resource["resource"]["id"]
+        file_path = self.sources_path / f"{resource_id}.poml"
+        
+        # Check if file exists
+        existing = None
+        if file_path.exists():
+            existing = self.load_resource(file_path)
+            
+            # Update version
+            resource = self.update_version(existing, resource)
+            
+            # Add to changelog
+            resource = self.add_changelog_entry(existing, resource)
+        
+        # Update timestamps
+        now = datetime.now(timezone.utc).isoformat()
+        if not existing:
+            resource["metadata"]["created_at"] = now
+        resource["metadata"]["updated_at"] = now
+        
+        # Write file
+        with open(file_path, "w") as f:
+            yaml.dump(resource, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        
+        self.logger.info(
+            "POML resource written",
+            resource_id=resource_id,
+            path=str(file_path),
+            version=resource["metadata"]["version_semver"]
+        )
+        
+        return file_path
+    
+    def load_resource(self, file_path: Path) -> Optional[Dict[str, Any]]:
+        """Load existing POML resource"""
+        try:
+            with open(file_path, "r") as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            self.logger.error("Failed to load resource", path=str(file_path), error=str(e))
+            return None
+    
+    def update_version(self, existing: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+        """Update semantic version based on changes"""
+        existing_version = semantic_version.Version(existing["metadata"]["version_semver"])
+        
+        # Determine version bump type
+        bump_type = self.determine_version_bump(existing, new)
+        
+        if bump_type == "major":
+            new_version = existing_version.next_major()
+        elif bump_type == "minor":
+            new_version = existing_version.next_minor()
+        else:
+            new_version = existing_version.next_patch()
+        
+        new["metadata"]["version_semver"] = str(new_version)
+        
+        self.logger.debug(
+            "Version updated",
+            resource_id=new["resource"]["id"],
+            old_version=str(existing_version),
+            new_version=str(new_version),
+            bump_type=bump_type
+        )
+        
+        return new
+    
+    def determine_version_bump(self, existing: Dict[str, Any], new: Dict[str, Any]) -> str:
+        """Determine type of version bump needed"""
+        
+        # Check for breaking changes (major bump)
+        breaking_changes = [
+            "interfaces.http.base_url",
+            "access.authentication.methods",
+            "data_model.scale"
+        ]
+        
+        for path in breaking_changes:
+            if self.get_nested_value(existing, path) != self.get_nested_value(new, path):
+                return "major"
+        
+        # Check for feature additions (minor bump)
+        feature_changes = [
+            "interfaces.websocket",
+            "sdk.available",
+            "coverage.sources",
+            "data_model.fields"
+        ]
+        
+        for path in feature_changes:
+            existing_val = self.get_nested_value(existing, path)
+            new_val = self.get_nested_value(new, path)
+            
+            # Check if new features added
+            if isinstance(new_val, list) and isinstance(existing_val, list):
+                if len(new_val) > len(existing_val):
+                    return "minor"
+            elif new_val and not existing_val:
+                return "minor"
+        
+        # Default to patch for other changes
+        return "patch"
+    
+    def get_nested_value(self, data: Dict[str, Any], path: str) -> Any:
+        """Get nested dictionary value by dot notation path"""
+        keys = path.split(".")
+        value = data
+        
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key)
+            else:
+                return None
+        
+        return value
+    
+    def add_changelog_entry(self, existing: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+        """Add changelog entry for update"""
+        if "changelog" not in new["metadata"]:
+            new["metadata"]["changelog"] = []
+        
+        # Copy existing changelog
+        if existing and "changelog" in existing["metadata"]:
+            new["metadata"]["changelog"] = existing["metadata"]["changelog"].copy()
+        
+        # Create changelog entry
+        changes = self.detect_changes(existing, new)
+        
+        entry = {
+            "version": new["metadata"]["version_semver"],
+            "date": datetime.now(timezone.utc).isoformat(),
+            "changes": changes
+        }
+        
+        new["metadata"]["changelog"].insert(0, entry)
+        
+        # Keep only last 10 entries
+        new["metadata"]["changelog"] = new["metadata"]["changelog"][:10]
+        
+        return new
+    
+    def detect_changes(self, existing: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
+        """Detect what changed between versions"""
+        changes = []
+        
+        # Check score change
+        old_score = existing.get("evaluation", {}).get("total_score", 0)
+        new_score = new.get("evaluation", {}).get("total_score", 0)
+        
+        if abs(old_score - new_score) > 1:
+            changes.append(f"Score updated: {old_score} → {new_score}")
+        
+        # Check pricing model change
+        old_pricing = existing.get("access", {}).get("pricing_model")
+        new_pricing = new.get("access", {}).get("pricing_model")
+        
+        if old_pricing != new_pricing:
+            changes.append(f"Pricing model changed: {old_pricing} → {new_pricing}")
+        
+        # Check new endpoints
+        old_endpoints = len(existing.get("interfaces", {}).get("http", {}).get("endpoints", []))
+        new_endpoints = len(new.get("interfaces", {}).get("http", {}).get("endpoints", []))
+        
+        if new_endpoints > old_endpoints:
+            changes.append(f"Added {new_endpoints - old_endpoints} new endpoints")
+        
+        # Check coverage expansion
+        old_sources = existing.get("coverage", {}).get("sources", [])
+        new_sources = new.get("coverage", {}).get("sources", [])
+        
+        added_sources = set(new_sources) - set(old_sources)
+        if added_sources:
+            changes.append(f"Added sources: {', '.join(added_sources)}")
+        
+        if not changes:
+            changes.append("Minor updates and improvements")
+        
+        return changes
+```
+
+```python
+# /agents/sentiment_registrar/src/emitters/registry_index.py
+"""
+Registry index builder for search and discovery
+"""
+
+import json
+from pathlib import Path
+from typing import Dict, Any, List
+import yaml
+from datetime import datetime
+import structlog
+
+class RegistryIndexBuilder:
+    """Builds searchable index of all POML resources"""
+    
+    def __init__(self, settings, logger: structlog.BoundLogger):
+        self.settings = settings
+        self.logger = logger
+        self.sources_path = settings.sources_path
+        self.index_path = settings.index_path
+    
+    async def build_index(self) -> Dict[str, Any]:
+        """Build complete index of all resources"""
+        resources = []
+        
+        # Scan all POML files
+        for poml_file in self.sources_path.glob("*.poml"):
+            try:
+                with open(poml_file, "r") as f:
+                    resource = yaml.safe_load(f)
+                
+                # Extract searchable fields
+                summary = self.create_resource_summary(resource)
+                resources.append(summary)
+                
+            except Exception as e:
+                self.logger.error("Failed to index resource", file=str(poml_file), error=str(e))
+        
+        # Sort by score
+        resources.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+        
+        # Create index
+        index = {
+            "version": "1.0",
+            "generated_at": datetime.utcnow().isoformat(),
+            "total_resources": len(resources),
+            "resources": resources,
+            "facets": self.build_facets(resources),
+            "metadata": {
+                "scoring_version": "1.0",
+                "last_sweep": datetime.utcnow().isoformat()
+            }
+        }
+        
+        # Write index
+        with open(self.index_path, "w") as f:
+            json.dump(index, f, indent=2)
+        
+        self.logger.info(
+            "Index built",
+            total_resources=len(resources),
+            path=str(self.index_path)
+        )
+        
+        return index
+    
+    def create_resource_summary(self, resource: Dict[str, Any]) -> Dict[str, Any]:
+        """Create searchable summary of resource"""
+        return {
+            "id": resource["resource"]["id"],
+            "name": resource["resource"]["name"],
+            "category": resource["resource"]["category"],
+            "subtypes": resource["resource"]["subtypes"],
+            "homepage": resource["resource"]["homepage"],
+            "description": resource["resource"]["description"][:200],
+            "pricing_model": resource["access"]["pricing_model"],
+            "has_free_tier": any(p["monthly_price_usd"] == 0 for p in resource["access"]["plans"]),
+            "authentication": resource["access"]["authentication"]["methods"],
+            "sources

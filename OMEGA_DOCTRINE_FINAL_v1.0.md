@@ -5,7 +5,7 @@
 
 ## PREFACE
 
-### v1.0 — The Unification Accords
+### — The Unification Accords
 
 *Git tag: `doctrine-v1.0`*
 
@@ -174,7 +174,7 @@ The OMEGA ecosystem is not a static machine; it is a **living digital organism**
 
 1. **SURVIVE (Resilience & Anti-Fragility)**  
    *The swarm must endure all trials, growing stronger from chaos.*  
-   Every component is forged with the `BaseAgent v1.0` chassis or a resilient service pattern, equipped with circuit breakers, redundant channels, and the `FederationCore`’s fault-tolerant routing. Failure is not defeat; it is fuel for evolution.  
+   Every component is forged with the `BaseAgent` chassis or a resilient service pattern, equipped with circuit breakers, redundant channels, and the `FederationCore`’s fault-tolerant routing. Failure is not defeat; it is fuel for evolution.  
    **Implementation:**  
    * Agents leverage the `CollaboratorMixin` for decentralized, self-selecting task processing, eliminating single points of failure.  
    * The `FederationCore` uses its `Reputation Engine` and `Circuit Breakers` to dynamically route around and isolate underperforming or failed external dependencies.  
@@ -307,7 +307,7 @@ All components, agents, tools, and services shall be marked as **Version 1.0** f
 
 **Implementation:**
 
-* All file headers must include: `OMEGA [Component/Service/Agent/Tool] v1.0`.
+* All file headers must include: `OMEGA [Component/Service/Agent/Tool]`.
 * All documentation references `v1.0` for the initial release.
 * Future versioning will follow the Amendment Protocol (Part VI).
 

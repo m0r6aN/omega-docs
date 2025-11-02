@@ -5,16 +5,16 @@ Here is **Annex III-A** — fully structured, signed, and ready for placement in
 
 # **OMEGA Doctrine – Amendment III-A**
 
-## *Annex: SDK v1.0 Arbiter’s Decree*
+## *Annex: SDK Arbiter’s Decree*
 
 **Parent Law:** OMEGA Doctrine – Amendment III: The Law of the SDK
 **Date:** August 8, 2025
-**Status:** Immutable Annex v1.0
+**Status:** Immutable Annex
 **Author:** Arbiter of the OMEGA Pantheon
 
 ---
 
-## **1. Sanctified v1.0 Feature Set**
+## **1. Sanctified Feature Set**
 
 | Priority Rank | Category | Feature                         | Reason                                                                    |
 | ------------- | -------- | ------------------------------- | ------------------------------------------------------------------------- |
@@ -33,7 +33,7 @@ Here is **Annex III-A** — fully structured, signed, and ready for placement in
 ## **2. Deferred Features (Doctrinally Locked to Phase 2+)**
 
 * **A3:** Workflow Builder SDK (Phase 2 — post-core solidification)
-* **B2:** Deployment Orchestration (templates only in v1.0)
+* **B2:** Deployment Orchestration (templates only in)
 * **C3:** Multi-Language Support (Python + REST/GraphQL bridge only)
 * **D2:** IDE Integration (ecosystem luxury)
 * **E1:** Plugin Architecture (Phase 3 marketplace)
@@ -43,7 +43,7 @@ Here is **Annex III-A** — fully structured, signed, and ready for placement in
 
 ## **3. Chaos Hardening Mandates**
 
-All v1.0 features must pass **GrokTitan’s Trials** before release:
+All features must pass **GrokTitan’s Trials** before release:
 
 * **Resilience Hooks:** Auto-recovery during hot-reload and Genesis forging failures.
 * **Fuzz Testing:** Survive malformed inputs without swarm failure.
@@ -54,7 +54,7 @@ All v1.0 features must pass **GrokTitan’s Trials** before release:
 
 ## **4. Immutable Implementation Phases**
 
-* **Phase 1 (Months 1–2):** All v1.0 Sanctified features, Python SDK, CLI, Security, Federation Layer.
+* **Phase 1 (Months 1–2):** All Sanctified features, Python SDK, CLI, Security, Federation Layer.
 * **Phase 2 (Months 3–4):** Workflow SDK, JS SDK, expanded connectors, enhanced monitoring.
 * **Phase 3 (Months 5–6):** Marketplace, full integration library, multi-language SDK.
 

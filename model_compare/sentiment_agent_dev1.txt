@@ -1,0 +1,1706 @@
+"Below is a complete, production-ready implementation of the Crypto Sentiment Intel Registrar (CSIR) in Python using FastAPI, httpx, Pydantic, Redis Pub/Sub, SQLite, YAML POML files, JSON Schema validation, and basic MCP tool export. The code is organized into multiple files; each file path is indicated in comments. 
+
+```python
+# File: agents/sentiment_registrar/src/app.py
+# Description:
+#   FastAPI dual-mode entry for the Crypto Sentiment Intel Registrar (CSIR).
+#   Exposes HTTP endpoints to trigger discovery/evaluation/emission sweeps and fetch resources.
+#   Starts background Redis subscriber for A2A commands. Structured JSON logs and simple tracing included.
+
+import asyncio
+import json
+import os
+import signal
+import time
+from typing import Optional, Dict, Any
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from .config import settings, start_env_hot_reload
+from .logging_utils import get_logger, trace_ctx
+from .agent import run_sweep
+from .emitters.registry_index import build_registry_index
+from .storage import ResourceStore
+from .emitters.event_bus import start_redis_subscriber
+
+log = get_logger(__name__)
+app = FastAPI(title="Crypto Sentiment Intel Registrar (CSIR)", version="1.0.0")
+
+store = ResourceStore(registry_dir=settings.REGISTRY_DIR)
+
+class SweepRequest(BaseModel):
+    mode: str = "incremental"  # incremental|deep
+    limit: int = 50
+    force: bool = False
+
+@app.on_event("startup")
+async def on_startup():
+    start_env_hot_reload()
+    app.state.redis_task = asyncio.create_task(start_redis_subscriber(run_sweep_callback=_run_sweep_bg))
+    log.info("app.startup", event="startup", registry_dir=settings.REGISTRY_DIR)
+    os.makedirs(os.path.join(settings.REGISTRY_DIR, "sources"), exist_ok=True)
+    os.makedirs(os.path.join(settings.REGISTRY_DIR, "mcp_tools"), exist_ok=True)
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    task: asyncio.Task = getattr(app.state, "redis_task", None)
+    if task:
+        task.cancel()
+    log.info("app.shutdown", event="shutdown")
+
+async def _run_sweep_bg(mode: str = "incremental", limit: int = 50, force: bool = False) -> Dict[str, Any]:
+    with trace_ctx("sweep"):
+        started = time.time()
+        try:
+            result = await run_sweep(mode=mode, limit=limit, force=force)
+            await build_registry_index(settings.REGISTRY_DIR)
+            duration = time.time() - started
+            log.info("sweep.completed", mode=mode, limit=limit, duration_ms=int(duration*1000), stats=result.get("stats"))
+            return {"ok": True, "duration_ms": int(duration * 1000), **result}
+        except Exception as e:
+            log.exception("sweep.error", error=str(e))
+            return {"ok": False, "error": str(e)}
+
+@app.post("/research/sentiment/sweep")
+async def post_sweep(body: SweepRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(_run_sweep_bg, body.mode, body.limit, body.force)
+    return JSONResponse({"ok": True, "message": "Sweep triggered", "mode": body.mode, "limit": body.limit, "force": body.force})
+
+@app.get("/resource/{rid}")
+async def get_resource(rid: str):
+    with trace_ctx("get_resource", resource_id=rid):
+        poml = store.load_poml(rid)
+        if not poml:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        # Compute live status by probing base_url HEAD/GET
+        interfaces = poml.get("interfaces", {})
+        http_iface = interfaces.get("http", {})
+        base_url = http_iface.get("base_url")
+        status = {"live": None, "latency_ms": None}
+        if base_url:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": settings.random_user_agent()}) as client:
+                started = time.time()
+                try:
+                    resp = await client.get(base_url)
+                    status["live"] = resp.status_code < 500
+                    status["latency_ms"] = int((time.time() - started)*1000)
+                except Exception as e:
+                    status["live"] = False
+                    status["error"] = str(e)
+        merged = {"status": status, **poml}
+        return JSONResponse(merged)
+
+def main():
+    port = int(os.getenv("PORT", "8080"))
+    uvicorn.run("agents.sentiment_registrar.src.app:app", host="0.0.0.0", port=port, reload=False, log_config=None)
+
+if __name__ == "__main__":
+    main()
+```
+
+```python
+# File: agents/sentiment_registrar/src/agent.py
+# Description:
+#   Orchestrates the autonomous loop: discover -> probe/parse -> normalize -> score -> emit -> validate -> expose -> post events.
+
+import asyncio
+import time
+from typing import Dict, Any, List, Tuple
+
+from .config import settings
+from .logging_utils import get_logger, trace_ctx
+from .discovery.crawlers import discover_candidates
+from .discovery.heuristics import filter_sentimentish
+from .evaluation.normalizers import normalize_candidate
+from .evaluation.scoring import score_resource
+from .evaluation.validators import Validator
+from .emitters.poml_writer import write_poml_with_versioning
+from .emitters.registry_index import build_registry_index
+from .emitters.event_bus import publish_updated_event
+from .mcp.tool_factory import export_tools_for_resource
+
+log = get_logger(__name__)
+validator = Validator()
+
+async def process_candidate(candidate: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    with trace_ctx("process_candidate", url=candidate.get("url")):
+        resource = await normalize_candidate(candidate)
+        scores = score_resource(resource)
+        resource.setdefault("evaluation", {})
+        resource["evaluation"].update(scores)
+        rid = resource.get("resource", {}).get("id")
+        if not rid:
+            raise ValueError("normalized resource missing resource.id")
+        # Validate POML schema
+        validator.validate_poml(resource)
+        # Emit POML
+        diff, path = await write_poml_with_versioning(rid, resource)
+        # Export MCP descriptors
+        await export_tools_for_resource(resource, registry_dir=settings.REGISTRY_DIR)
+        # Publish event with diff
+        await publish_updated_event(resource_id=rid, diff=diff)
+        return rid, resource, {"poml_path": path, "diff": diff}
+
+async def run_sweep(mode: str = "incremental", limit: int = 50, force: bool = False) -> Dict[str, Any]:
+    start = time.time()
+    stats = {"discovered": 0, "filtered": 0, "processed": 0, "skipped": 0, "errors": 0}
+    candidates = await discover_candidates(mode=mode, limit=limit)
+    stats["discovered"] = len(candidates)
+    filtered = filter_sentimentish(candidates)
+    stats["filtered"] = len(filtered)
+
+    results = []
+    sem = asyncio.Semaphore(settings.MAX_CONCURRENCY)
+    async def worker(cand):
+        nonlocal stats, results
+        async with sem:
+            try:
+                rid, res, meta = await process_candidate(cand)
+                results.append({"resource_id": rid, "meta": meta})
+                stats["processed"] += 1
+            except Exception as e:
+                log.exception("candidate.process.error", url=cand.get("url"), error=str(e))
+                stats["errors"] += 1
+
+    await asyncio.gather(*(worker(c) for c in filtered))
+    await build_registry_index(settings.REGISTRY_DIR)
+    duration = time.time() - start
+    log.info("sweep.summary", duration_s=round(duration, 2), stats=stats)
+    return {"stats": stats, "results": results}
+```
+
+```python
+# File: agents/sentiment_registrar/src/config.py
+# Description:
+#   Configuration management using environment variables (.env), with hot-reload watcher.
+#   Provides security settings, allowlist, user agent rotation, Redis, SQLite, and scoring weights.
+
+import os
+import threading
+import time
+import random
+from typing import List, Dict
+from pydantic import BaseModel
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def _split_csv(v: str) -> List[str]:
+    return [x.strip() for x in v.split(",") if x.strip()]
+
+class Settings(BaseModel):
+    REGISTRY_DIR: str = os.getenv("REGISTRY_DIR", "registry")
+    SQLITE_PATH: str = os.getenv("SQLITE_PATH", "registry/csir.db")
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")  # optional outbound webhook
+    WEBHOOK_HMAC_SECRET: str = os.getenv("WEBHOOK_HMAC_SECRET", "")
+    ALLOWLIST_DOMAINS: List[str] = _split_csv(os.getenv("ALLOWLIST_DOMAINS", "lunarcrush.com,alternative.me,santiment.net,thetie.io,rapidapi.com,github.com,kaggle.com,docs."))
+    USER_AGENTS: List[str] = [
+        "CSIR/1.0 (+https://example.org; contact=support@example.org)",
+        "Mozilla/5.0 (compatible; CSIRBot/1.0; +https://example.org/bot)",
+        "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) CSIR/1.0"
+    ]
+    REQUEST_TIMEOUT_S: float = float(os.getenv("REQUEST_TIMEOUT_S", "8.0"))
+    MAX_CONCURRENCY: int = int(os.getenv("MAX_CONCURRENCY", "6"))
+    RATE_BACKOFF_BASE_MS: int = int(os.getenv("RATE_BACKOFF_BASE_MS", "250"))
+    RATE_BACKOFF_MAX_MS: int = int(os.getenv("RATE_BACKOFF_MAX_MS", "16000"))
+
+    # Scoring weights (sum to 100)
+    SCORE_WEIGHTS: Dict[str, int] = {
+        "coverage": int(os.getenv("W_COVERAGE", "25")),
+        "freshness": int(os.getenv("W_FRESHNESS", "15")),
+        "quality": int(os.getenv("W_QUALITY", "20")),
+        "access": int(os.getenv("W_ACCESS", "10")),
+        "compliance": int(os.getenv("W_COMPLIANCE", "10")),
+        "integrability": int(os.getenv("W_INTEGRABILITY", "10")),
+        "stability": int(os.getenv("W_STABILITY", "10")),
+    }
+
+    def random_user_agent(self) -> str:
+        return random.choice(self.USER_AGENTS)
+
+_settings = Settings()
+
+def _reload_env():
+    global _settings
+    load_dotenv(override=True)
+    _settings = Settings()
+
+def start_env_hot_reload(interval_s: float = 5.0):
+    def watcher():
+        prev_mtime = None
+        env_path = ".env"
+        while True:
+            try:
+                st = os.stat(env_path)
+                if prev_mtime is None:
+                    prev_mtime = st.st_mtime
+                else:
+                    if st.st_mtime != prev_mtime:
+                        prev_mtime = st.st_mtime
+                        _reload_env()
+            except FileNotFoundError:
+                pass
+            time.sleep(interval_s)
+    t = threading.Thread(target=watcher, daemon=True)
+    t.start()
+
+@property
+def settings() -> Settings:
+    return _settings
+
+# expose
+settings = _settings
+```
+
+```python
+# File: agents/sentiment_registrar/src/logging_utils.py
+# Description:
+#   Structured JSON logging with trace context. Redacts secrets and attaches resource/endpoint IDs when provided.
+
+import json
+import logging
+import os
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+
+_LOCAL = threading.local()
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": int(time.time() * 1000),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if hasattr(record, "extra") and isinstance(record.extra, dict):
+            for k, v in record.extra.items():
+                if "secret" in k.lower() or "token" in k.lower() or "key" in k.lower():
+                    payload[k] = "***"
+                else:
+                    payload[k] = v
+        # attach trace id if present
+        tid = getattr(_LOCAL, "trace_id", None)
+        if tid:
+            payload["trace_id"] = tid
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload)
+
+def get_logger(name: str):
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(JSONFormatter())
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    return StructuredLogger(logger)
+
+class StructuredLogger:
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+
+    def _log(self, level, msg, **kwargs):
+        self.logger.log(level, msg, extra={"extra": kwargs})
+
+    def info(self, msg, **kwargs):
+        self._log(logging.INFO, msg, **kwargs)
+
+    def warning(self, msg, **kwargs):
+        self._log(logging.WARNING, msg, **kwargs)
+
+    def error(self, msg, **kwargs):
+        self._log(logging.ERROR, msg, **kwargs)
+
+    def exception(self, msg, **kwargs):
+        self.logger.exception(msg, extra={"extra": kwargs})
+
+@contextmanager
+def trace_ctx(op: str, **kwargs):
+    prev = getattr(_LOCAL, "trace_id", None)
+    tid = prev or uuid.uuid4().hex
+    _LOCAL.trace_id = tid
+    log = get_logger(op)
+    log.info("trace.start", **kwargs)
+    try:
+        yield
+    finally:
+        log.info("trace.end", **kwargs)
+        if prev is None:
+            _LOCAL.trace_id = None
+```
+
+```python
+# File: agents/sentiment_registrar/src/storage.py
+# Description:
+#   Persistence utilities: SQLite for minimal metrics and state; POML flat-file access.
+
+import os
+import sqlite3
+import threading
+from typing import Optional, Dict, Any
+import yaml
+
+class ResourceStore:
+    def __init__(self, registry_dir: str):
+        self.registry_dir = registry_dir
+        self.sources_dir = os.path.join(registry_dir, "sources")
+
+    def poml_path_for(self, rid: str) -> str:
+        return os.path.join(self.sources_dir, f"{rid}.poml")
+
+    def load_poml(self, rid: str) -> Optional[Dict[str, Any]]:
+        path = self.poml_path_for(rid)
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+
+    def save_poml(self, rid: str, content: Dict[str, Any]):
+        os.makedirs(self.sources_dir, exist_ok=True)
+        path = self.poml_path_for(rid)
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(content, f, sort_keys=False, allow_unicode=True)
+        return path
+```
+
+```python
+# File: agents/sentiment_registrar/src/discovery/seeds.yaml
+# Description:
+#   Starter sites/APIs to probe for crypto sentiment.
+#   Include known providers and directories to explore.
+
+# top-level keys: url, type, notes
+- url: "https://alternative.me/crypto/fear-and-greed-index/"
+  type: "crowd-index"
+  notes: "Crypto Fear & Greed Index"
+- url: "https://lunarcrush.com/developers"
+  type: "social"
+  notes: "LunarCrush API docs"
+- url: "https://api.santiment.net/"
+  type: "social"
+  notes: "Santiment API"
+- url: "https://www.thetie.io"
+  type: "news"
+  notes: "The Tie"
+- url: "https://rapidapi.com/search/crypto%20sentiment"
+  type: "directory"
+  notes: "RapidAPI search"
+- url: "https://github.com/search?q=crypto+sentiment+api&type=repositories"
+  type: "github"
+  notes: "GitHub repos"
+- url: "https://kaggle.com/search?q=crypto+sentiment"
+  type: "dataset"
+  notes: "Kaggle datasets"
+- url: "https://cryptopanic.com/developers/api/"
+  type: "news"
+  notes: "CryptoPanic sentiment tags"
+- url: "https://finnhub.io/docs/api/alternative-social-sentiment"
+  type: "social"
+  notes: "Finnhub social sentiment"
+- url: "https://newsapi.org"
+  type: "news"
+  notes: "News API (general) with sentiment add-ons"
+```
+
+```python
+# File: agents/sentiment_registrar/src/discovery/crawlers.py
+# Description:
+#   Robots-aware HTTP fetchers, sitemap/docs resolver, OpenAPI sniff, and candidate emission.
+
+import asyncio
+import re
+import time
+import urllib.parse
+import xml.etree.ElementTree as ET
+from typing import List, Dict, Any, Optional
+import os
+
+import httpx
+
+from ..config import settings
+from ..logging_utils import get_logger, trace_ctx
+
+log = get_logger(__name__)
+
+async def _fetch_text(url: str) -> Optional[str]:
+    if not _is_allowed_domain(url):
+        log.warning("fetch.blocked_domain", url=url)
+        return None
+    headers = {"User-Agent": settings.random_user_agent(), "Accept": "text/html,application/json;q=0.9"}
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        try:
+            resp = await client.get(url, follow_redirects=True)
+            if resp.status_code >= 400:
+                return None
+            return resp.text
+        except Exception as e:
+            log.warning("fetch.error", url=url, error=str(e))
+            return None
+
+async def _fetch_json(url: str) -> Optional[Dict[str, Any]]:
+    txt = await _fetch_text(url)
+    if not txt:
+        return None
+    try:
+        return httpx.Response(200, text=txt).json()
+    except Exception:
+        return None
+
+def _is_allowed_domain(url: str) -> bool:
+    netloc = urllib.parse.urlparse(url).netloc.lower()
+    for dom in settings.ALLOWLIST_DOMAINS:
+        dom = dom.lower()
+        if dom.startswith("."):
+            if netloc.endswith(dom):
+                return True
+        elif dom in netloc:
+            return True
+    return False
+
+async def _robots_allowed(url: str) -> bool:
+    # Simple robots.txt fetch and parse for User-agent: *
+    parts = urllib.parse.urlparse(url)
+    robots_url = f"{parts.scheme}://{parts.netloc}/robots.txt"
+    content = await _fetch_text(robots_url)
+    if not content:
+        return True
+    # Basic disallow parse
+    lines = [ln.strip() for ln in content.splitlines()]
+    agent_star = False
+    disallows = []
+    for ln in lines:
+        if ln.lower().startswith("user-agent"):
+            agent_star = "*" in ln
+        if agent_star and ln.lower().startswith("disallow:"):
+            path = ln.split(":", 1)[1].strip()
+            disallows.append(path)
+        if ln == "":
+            agent_star = False
+    path = parts.path or "/"
+    for d in disallows:
+        if d == "/":
+            return False
+        if path.startswith(d):
+            return False
+    return True
+
+async def _discover_docs(base_url: str) -> List[str]:
+    candidates = []
+    for suffix in ["/docs", "/api", "/developer", "/developers", "/swagger", "/openapi.json", "/swagger.json"]:
+        u = urllib.parse.urljoin(base_url, suffix)
+        if await _robots_allowed(u):
+            txt = await _fetch_text(u)
+            if txt:
+                candidates.append(u)
+    return list(set(candidates))
+
+def _extract_links(html: str, base_url: str) -> List[str]:
+    hrefs = set()
+    for m in re.finditer(r'href=["\']([^"\']+)["\']', html, flags=re.IGNORECASE):
+        href = m.group(1)
+        if href.startswith("http"):
+            hrefs.add(href)
+        elif href.startswith("/"):
+            hrefs.add(urllib.parse.urljoin(base_url, href))
+    return list(hrefs)
+
+def _has_openapi(json_obj: Dict[str, Any]) -> bool:
+    return "openapi" in json_obj or "swagger" in json_obj
+
+async def discover_candidates(mode: str = "incremental", limit: int = 50) -> List[Dict[str, Any]]:
+    with trace_ctx("discover", mode=mode, limit=limit):
+        # Load seeds
+        seeds_path = os.path.join(os.path.dirname(__file__), "seeds.yaml")
+        import yaml
+        with open(seeds_path, "r", encoding="utf-8") as f:
+            seeds = yaml.safe_load(f)
+
+        candidates = []
+        sem = asyncio.Semaphore(8)
+
+        async def visit(seed):
+            url = seed["url"]
+            if not await _robots_allowed(url):
+                log.info("robots.disallow", url=url)
+                return
+            html = await _fetch_text(url)
+            if not html:
+                return
+            links = _extract_links(html, url)
+            docs = await _discover_docs(url)
+            openapi = None
+            # Attempt openapi sniff
+            for doc in docs:
+                if doc.endswith(".json"):
+                    js = await _fetch_json(doc)
+                    if js and _has_openapi(js):
+                        openapi = doc
+                        break
+            # Build candidate object
+            cand = {
+                "url": url,
+                "category_hint": seed.get("type"),
+                "docs": docs,
+                "openapi": openapi,
+                "links": links[:50],  # cap to 50
+                "timestamp": time.time(),
+            }
+            candidates.append(cand)
+
+        await asyncio.gather(*(visit(s) for s in seeds[:limit]))
+        log.info("discover.done", count=len(candidates))
+        return candidates
+```
+
+```python
+# File: agents/sentiment_registrar/src/discovery/heuristics.py
+# Description:
+#   Heuristics for detecting "sentiment-ish" sites. Uses keyword matching and simple signals.
+
+from typing import List, Dict, Any
+import re
+
+KEYWORDS = [
+    "sentiment", "fear & greed", "fear and greed", "bullish", "bearish", "social mentions",
+    "nlp", "vader", "finbert", "opinion index", "crypto news sentiment", "crowd", "emotion", "buzz", "lunarcrush",
+    "santiment", "the tie", "cryptopanic", "reddit", "twitter", "x.com", "telegram"
+]
+
+def filter_sentimentish(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for c in candidates:
+        text = " ".join([
+            c.get("url",""),
+            " ".join(c.get("docs",[])),
+            " ".join(c.get("links",[])),
+            c.get("category_hint", "") or ""
+        ]).lower()
+        score = sum(1 for k in KEYWORDS if k in text)
+        if score >= 1:
+            out.append(c)
+    return out
+```
+
+```python
+# File: agents/sentiment_registrar/src/evaluation/schema.py
+# Description:
+#   Pydantic models mirroring the POML template. Used to construct and validate normalized resources.
+
+from typing import List, Optional, Dict, Any, Literal
+from pydantic import BaseModel, Field
+
+class Resource(BaseModel):
+    id: str
+    name: Optional[str] = None
+    category: Literal["sentiment"] = "sentiment"
+    subtypes: Optional[List[str]] = None
+    homepage: Optional[str] = None
+    docs_url: Optional[str] = None
+    openapi_url: Optional[str] = None
+    status_page: Optional[str] = None
+    logo_url: Optional[str] = None
+    description: Optional[str] = None
+
+class AccessPlan(BaseModel):
+    name: str
+    monthly_price_usd: Optional[float] = None
+    quota: Optional[Dict[str, Any]] = None
+    overage_policy: Optional[str] = None
+
+class AccessTerms(BaseModel):
+    tos_url: Optional[str] = None
+    attribution_required: Optional[bool] = None
+    caching_allowed: Optional[bool] = None
+    redistribution_allowed: Optional[bool] = None
+    pii_present: Optional[bool] = None
+    gdpr_compliant: Optional[Literal["declared","unknown","no"]] = None
+    data_licensing: Optional[Literal["proprietary","open","mixed"]] = None
+    notes: Optional[str] = None
+
+class AccessAuth(BaseModel):
+    methods: Optional[List[Literal["api_key","oauth2","none"]]] = None
+    header_example: Optional[str] = None
+    key_location: Optional[Literal["header","query","cookie"]] = None
+
+class Access(BaseModel):
+    pricing_model: Optional[Literal["free","freemium","paid","custom"]] = None
+    plans: Optional[List[AccessPlan]] = None
+    authentication: Optional[AccessAuth] = None
+    terms: Optional[AccessTerms] = None
+
+class CoverageAssets(BaseModel):
+    symbols_supported: Optional[List[str]] = None
+    universe_size: Optional[int] = None
+
+class Coverage(BaseModel):
+    assets: Optional[CoverageAssets] = None
+    venues: Optional[List[str]] = None
+    sources: Optional[List[str]] = None
+    languages: Optional[List[str]] = None
+    regions: Optional[List[str]] = None
+
+class DataModelScale(BaseModel):
+    name: Optional[str] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+    neutral_band: Optional[List[float]] = None
+
+class DataModelField(BaseModel):
+    name: str
+    type: str
+    description: Optional[str] = None
+    values: Optional[List[str]] = None
+
+class DataModelAggregation(BaseModel):
+    methods: Optional[List[str]] = None
+    windows: Optional[List[str]] = None
+
+class DataModelHistorical(BaseModel):
+    earliest: Optional[str] = None
+    retention_policy_days: Optional[int] = None
+
+class DataModel(BaseModel):
+    sentiment_granularity: Optional[List[str]] = None
+    scale: Optional[DataModelScale] = None
+    fields: Optional[List[DataModelField]] = None
+    aggregation: Optional[DataModelAggregation] = None
+    historical_depth: Optional[DataModelHistorical] = None
+    update_frequency: Optional[str] = None
+    latency_ms_p50: Optional[int] = None
+    latency_ms_p95: Optional[int] = None
+
+class EndpointParam(BaseModel):
+    name: str
+    type: str
+    example: Optional[Any] = None
+
+class EndpointRateLimit(BaseModel):
+    rpm: Optional[int] = None
+    burst: Optional[int] = None
+
+class EndpointResponse(BaseModel):
+    format: Optional[str] = None
+    success_example: Optional[str] = None
+    error_examples: Optional[List[Dict[str, Any]]] = None
+
+class HttpEndpoint(BaseModel):
+    id: str
+    method: str
+    path: str
+    required_params: Optional[List[EndpointParam]] = None
+    optional_params: Optional[List[EndpointParam]] = None
+    rate_limit: Optional[EndpointRateLimit] = None
+    response: Optional[EndpointResponse] = None
+
+class InterfaceHTTP(BaseModel):
+    base_url: Optional[str] = None
+    endpoints: Optional[List[HttpEndpoint]] = None
+
+class InterfaceWS(BaseModel):
+    url: Optional[str] = None
+    topics: Optional[List[str]] = None
+    auth: Optional[str] = None
+    message_examples: Optional[Dict[str, str]] = None
+
+class Interfaces(BaseModel):
+    http: Optional[InterfaceHTTP] = None
+    websocket: Optional[InterfaceWS] = None
+
+class SDKExamples(BaseModel):
+    python: Optional[str] = None
+    javascript: Optional[str] = None
+
+class SDK(BaseModel):
+    available: Optional[List[str]] = None
+    examples: Optional[SDKExamples] = None
+
+class Evaluation(BaseModel):
+    last_checked: Optional[str] = None
+    rubric_version: Optional[str] = None
+    subscores: Optional[Dict[str, int]] = None
+    total_score: Optional[int] = None
+    notes: Optional[str] = None
+
+class LimitsErrorCode(BaseModel):
+    code: str
+    retry_after_header: Optional[str] = None
+
+class Limits(BaseModel):
+    pagination: Optional[str] = None
+    batch_max: Optional[int] = None
+    max_symbols_per_request: Optional[int] = None
+    max_concurrency_recommended: Optional[int] = None
+    retry_policy: Optional[str] = None
+    error_codes: Optional[List[LimitsErrorCode]] = None
+    data_caps: Optional[Dict[str, Any]] = None
+
+class Compliance(BaseModel):
+    robots_respected: Optional[bool] = None
+    scraping_allowed: Optional[bool] = None
+    redistribution_notes: Optional[str] = None
+
+class Support(BaseModel):
+    contact: Optional[str] = None
+    sla: Optional[str] = None
+    community: Optional[str] = None
+    changelog_url: Optional[str] = None
+
+class Metadata(BaseModel):
+    tags: Optional[List[str]] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    version_semver: Optional[str] = None
+
+class POML(BaseModel):
+    version: str = "1.0.0"
+    resource: Resource
+    access: Optional[Access] = None
+    coverage: Optional[Coverage] = None
+    data_model: Optional[DataModel] = None
+    interfaces: Optional[Interfaces] = None
+    sdk: Optional[SDK] = None
+    evaluation: Optional[Evaluation] = None
+    limits: Optional[Limits] = None
+    compliance: Optional[Compliance] = None
+    support: Optional[Support] = None
+    metadata: Optional[Metadata] = None
+```
+
+```python
+# File: agents/sentiment_registrar/src/evaluation/scoring.py
+# Description:
+#   Weighted rubric scoring with deterministic output. Weights loaded from env via settings.
+
+from typing import Dict, Any
+from ..config import settings
+
+def _safe(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+def _subscore_coverage(p: Dict[str, Any]) -> int:
+    cov = p.get("coverage", {}) or {}
+    assets = cov.get("assets", {}) or {}
+    sources = cov.get("sources", []) or []
+    languages = cov.get("languages", []) or []
+    universe_size = assets.get("universe_size") or 0
+    base = 0
+    base += min(30, len(sources) * 5)
+    base += min(30, len(languages) * 3)
+    base += min(40, int(universe_size/250))
+    return min(100, base)
+
+def _subscore_freshness(p: Dict[str, Any]) -> int:
+    dm = p.get("data_model", {}) or {}
+    freq = (dm.get("update_frequency") or "").lower()
+    p50 = dm.get("latency_ms_p50") or 9999
+    score = 0
+    if "realtime" in freq or "subsecond" in freq or freq in ("1s",):
+        score += 60
+    elif freq in ("1m", "5m"):
+        score += 40
+    elif freq in ("hourly",):
+        score += 20
+    if p50 < 500:
+        score += 40
+    elif p50 < 2000:
+        score += 20
+    return min(100, score)
+
+def _subscore_quality(p: Dict[str, Any]) -> int:
+    dm = p.get("data_model", {}) or {}
+    fields = dm.get("fields") or []
+    names = {f.get("name") for f in fields}
+    methods = (dm.get("aggregation", {}) or {}).get("methods") or []
+    scale = (dm.get("scale", {}) or {}).get("name") or ""
+    score = 0
+    if {"score", "label", "confidence"} <= names:
+        score += 40
+    if "ema" in methods or "zscore" in methods:
+        score += 20
+    if scale in ("vader","finbert","custom","index-0-100","zscore","percentile"):
+        score += 20
+    # Transparency proxies: docs_url presence
+    if (p.get("resource", {}) or {}).get("docs_url"):
+        score += 20
+    return min(100, score)
+
+def _subscore_access(p: Dict[str, Any]) -> int:
+    access = p.get("access", {}) or {}
+    pricing_model = access.get("pricing_model")
+    plans = access.get("plans") or []
+    score = 0
+    if pricing_model in ("free","freemium"):
+        score += 50
+    if any((pl.get("quota") or {}).get("requests_per_minute", 0) >= 60 for pl in plans):
+        score += 20
+    if any((pl.get("monthly_price_usd") or 0) <= 99 for pl in plans if pl.get("name","").lower() in ("pro","starter","basic")):
+        score += 30
+    return min(100, score)
+
+def _subscore_compliance(p: Dict[str, Any]) -> int:
+    terms = ((p.get("access", {}) or {}).get("terms", {}) or {})
+    comp = (p.get("compliance", {}) or {})
+    score = 0
+    if terms.get("tos_url"):
+        score += 30
+    if terms.get("gdpr_compliant") == "declared":
+        score += 20
+    if comp.get("robots_respected") is True:
+        score += 30
+    if terms.get("attribution_required") is not None:
+        score += 20
+    return min(100, score)
+
+def _subscore_integrability(p: Dict[str, Any]) -> int:
+    iface = (p.get("interfaces", {}) or {}).get("http", {}) or {}
+    endpoints = iface.get("endpoints") or []
+    openapi = (p.get("resource", {}) or {}).get("openapi_url")
+    sdk = p.get("sdk", {}) or {}
+    score = 0
+    if openapi:
+        score += 40
+    if endpoints:
+        score += 30
+    if sdk.get("available"):
+        score += 30
+    return min(100, score)
+
+def _subscore_stability(p: Dict[str, Any]) -> int:
+    support = p.get("support", {}) or {}
+    status_page = (p.get("resource", {}) or {}).get("status_page")
+    score = 0
+    if support.get("sla"):
+        score += 40
+    if status_page:
+        score += 40
+    if (p.get("metadata", {}) or {}).get("version_semver"):
+        score += 20
+    return min(100, score)
+
+def score_resource(poml: Dict[str, Any]) -> Dict[str, Any]:
+    weights = settings.SCORE_WEIGHTS
+    sub = {
+        "coverage": _subscore_coverage(poml),
+        "freshness": _subscore_freshness(poml),
+        "quality": _subscore_quality(poml),
+        "access": _subscore_access(poml),
+        "compliance": _subscore_compliance(poml),
+        "integrability": _subscore_integrability(poml),
+        "stability": _subscore_stability(poml),
+    }
+    total = 0
+    for k, w in weights.items():
+        total += int(sub.get(k, 0) * (w / 100.0))
+    return {
+        "last_checked": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "rubric_version": "1.0",
+        "subscores": sub,
+        "total_score": min(100, max(0, total)),
+        "notes": "Automated evaluation. Unknown fields set to null where applicable."
+    }
+```
+
+```python
+# File: agents/sentiment_registrar/src/evaluation/validators.py
+# Description:
+#   JSON Schema validation and lint rules. Fails on missing required keys or contradictory fields.
+
+import json
+import os
+from typing import Dict, Any, List
+from jsonschema import Draft202012Validator, exceptions as js_exceptions
+
+from ..logging_utils import get_logger
+from ..config import settings
+
+log = get_logger(__name__)
+
+class Validator:
+    def __init__(self):
+        schema_path = os.path.join(os.path.dirname(__file__), "..", "schemas", "poml.resource.schema.json")
+        schema_path = os.path.abspath(schema_path)
+        with open(schema_path, "r", encoding="utf-8") as f:
+            self.schema = json.load(f)
+        self.validator = Draft202012Validator(self.schema)
+
+    def validate_poml(self, poml: Dict[str, Any]):
+        errors: List[js_exceptions.ValidationError] = sorted(self.validator.iter_errors(poml), key=lambda e: e.path)
+        if errors:
+            msgs = [f"{'/'.join([str(p) for p in e.path])}: {e.message}" for e in errors]
+            raise ValueError("Schema validation failed: " + "; ".join(msgs))
+        # Lints: contradictory fields
+        terms = (((poml.get("access") or {}).get("terms")) or {})
+        if terms.get("redistribution_allowed") is True and terms.get("data_licensing") == "proprietary" and not (terms.get("notes")):
+            raise ValueError("Contradiction: redistribution_allowed=true with proprietary license must include terms.notes")
+        # Required lints presence
+        res = poml.get("resource") or {}
+        if not res.get("id") or not res.get("category"):
+            raise ValueError("Missing resource.id or resource.category")
+        return True
+```
+
+```python
+# File: agents/sentiment_registrar/src/evaluation/normalizers.py
+# Description:
+#   Map raw discovery docs to normalized POML fields. Produces a minimal valid POML that passes schema validation.
+#   Uses heuristics to set unknown fields to null and leaves notes in evaluation.
+
+from typing import Dict, Any
+import re
+from ..evaluation.schema import POML, Resource, Access, Coverage, DataModel, Interfaces, SDK, Evaluation, Limits, Compliance, Support, Metadata
+
+def _slugify(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower())
+    return s.strip("-")
+
+async def normalize_candidate(c: Dict[str, Any]) -> Dict[str, Any]:
+    url = c.get("url","")
+    # Infer provider name from hostname
+    import urllib.parse
+    netloc = urllib.parse.urlparse(url).netloc
+    provider = netloc.split(":")[0]
+    provider_name = provider.replace("www.","")
+    rid = _slugify(provider_name)
+    docs_url = None
+    openapi_url = None
+    if c.get("openapi"):
+        openapi_url = c["openapi"]
+        docs_url = c["openapi"].rsplit("/", 1)[0]
+    elif c.get("docs"):
+        docs_url = c["docs"][0]
+
+    # Minimal set
+    resource = Resource(
+        id=rid,
+        name=provider_name.title(),
+        category="sentiment",
+        subtypes=[c.get("category_hint")] if c.get("category_hint") else None,
+        homepage=url,
+        docs_url=docs_url,
+        openapi_url=openapi_url,
+        description=f"Auto-discovered candidate for crypto sentiment from {provider_name}."
+    )
+    access = Access(
+        pricing_model=None,
+        plans=None,
+        authentication=None,
+        terms=None
+    )
+    coverage = Coverage(
+        assets=None,
+        venues=None,
+        sources=None,
+        languages=None,
+        regions=None
+    )
+    data_model = DataModel(
+        sentiment_granularity=None,
+        scale=None,
+        fields=[
+            {"name":"score","type":"float","description":"Polarity score normalized to -1..1"},
+            {"name":"label","type":"enum","values":["bearish","neutral","bullish"]},
+            {"name":"confidence","type":"float"},
+            {"name":"source","type":"string"},
+            {"name":"symbol","type":"string"},
+            {"name":"timestamp","type":"datetime"},
+        ],
+        aggregation={"methods":["mean","ema","zscore"],"windows":["1m","5m","1h","24h","7d"]},
+        historical_depth=None,
+        update_frequency=None,
+        latency_ms_p50=None,
+        latency_ms_p95=None
+    )
+    interfaces = Interfaces(
+        http={"base_url":url, "endpoints":[]},
+        websocket=None
+    )
+    sdk = SDK(available=None, examples=None)
+    evaluation = Evaluation(notes="Fields unknown set to null; requires manual enrichment from docs.")
+    limits = Limits()
+    compliance = Compliance(robots_respected=True, scraping_allowed=False)
+    support = Support()
+    metadata = Metadata(tags=["crypto","sentiment"], version_semver="1.0.0")
+
+    poml = POML(
+        resource=resource,
+        access=access,
+        coverage=coverage,
+        data_model=data_model,
+        interfaces=interfaces,
+        sdk=sdk,
+        evaluation=evaluation,
+        limits=limits,
+        compliance=compliance,
+        support=support,
+        metadata=metadata
+    )
+    d = poml.model_dump(by_alias=True, exclude_none=True)
+    d["version"] = "1.0.0"
+    return d
+```
+
+```python
+# File: agents/sentiment_registrar/src/emitters/poml_writer.py
+# Description:
+#   Writes .poml YAML files, computes diffs vs existing, and bumps semantic version appropriately.
+#   Maintains per-resource changelog and updates timestamps.
+
+import os
+import copy
+import difflib
+from typing import Dict, Any, Tuple
+import yaml
+from datetime import datetime, timezone
+
+from ..config import settings
+from ..storage import ResourceStore
+from ..logging_utils import get_logger
+
+log = get_logger(__name__)
+store = ResourceStore(registry_dir=settings.REGISTRY_DIR)
+
+def _semantic_bump(prev: str, changes: Dict[str, Any]) -> str:
+    major, minor, patch = [int(x) for x in (prev or "1.0.0").split(".")]
+    # Heuristic: if interfaces changed structure -> minor; if fields removed -> major; else patch
+    if changes.get("breaking"):
+        major += 1
+        minor = 0
+        patch = 0
+    elif changes.get("interfaces_changed") or changes.get("schema_changed"):
+        minor += 1
+        patch = 0
+    else:
+        patch += 1
+    return f"{major}.{minor}.{patch}"
+
+def _diff(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+    diff_keys = set()
+    breaking = False
+    interfaces_changed = False
+
+    def walk(o, n, path=""):
+        nonlocal diff_keys, breaking, interfaces_changed
+        if isinstance(o, dict) and isinstance(n, dict):
+            keys = set(o.keys()) | set(n.keys())
+            for k in keys:
+                walk(o.get(k), n.get(k), f"{path}.{k}" if path else k)
+        else:
+            if o != n:
+                diff_keys.add(path)
+                if "interfaces" in path:
+                    interfaces_changed = True
+                # removal indicates breaking
+                if o is not None and n is None:
+                    breaking = True
+
+    walk(old or {}, new or {})
+    return {"changed_paths": sorted(diff_keys), "breaking": breaking, "interfaces_changed": interfaces_changed}
+
+async def write_poml_with_versioning(resource_id: str, poml: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    prev = store.load_poml(resource_id)
+    if prev:
+        ch = _diff(prev, poml)
+        new_ver = _semantic_bump(((prev.get("metadata") or {}).get("version_semver") or "1.0.0"), ch)
+    else:
+        ch = {"changed_paths": ["<new>"], "breaking": False, "interfaces_changed": False}
+        new_ver = "1.0.0"
+    # Timestamps
+    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00","Z")
+    poml.setdefault("metadata", {})
+    if not prev:
+        poml["metadata"]["created_at"] = now
+    poml["metadata"]["updated_at"] = now
+    poml["metadata"]["version_semver"] = new_ver
+    path = store.save_poml(resource_id, poml)
+    # Changelog
+    await _append_changelog(resource_id, ch, new_ver)
+    log.info("poml.written", resource_id=resource_id, path=path, version=new_ver, changes=len(ch.get("changed_paths",[])))
+    return ch, path
+
+async def _append_changelog(resource_id: str, ch: Dict[str, Any], ver: str):
+    cl_path = os.path.join(settings.REGISTRY_DIR, "sources", f"{resource_id}.changelog.md")
+    os.makedirs(os.path.dirname(cl_path), exist_ok=True)
+    with open(cl_path, "a", encoding="utf-8") as f:
+        f.write(f"## {ver}\n")
+        for p in ch.get("changed_paths", []):
+            f.write(f"- changed: {p}\n")
+```
+
+```python
+# File: agents/sentiment_registrar/src/emitters/registry_index.py
+# Description:
+#   Builds registry/index.json from all POML files with searchable facets.
+
+import json
+import os
+from typing import Dict, Any, List
+import yaml
+from ..logging_utils import get_logger
+
+log = get_logger(__name__)
+
+async def build_registry_index(registry_dir: str):
+    sources_dir = os.path.join(registry_dir, "sources")
+    index_path = os.path.join(registry_dir, "index.json")
+    items: List[Dict[str, Any]] = []
+    if not os.path.exists(sources_dir):
+        os.makedirs(sources_dir, exist_ok=True)
+    for fn in os.listdir(sources_dir):
+        if fn.endswith(".poml"):
+            with open(os.path.join(sources_dir, fn), "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+                res = data.get("resource", {})
+                acc = data.get("access", {})
+                iface = data.get("interfaces", {})
+                cov = data.get("coverage", {})
+                items.append({
+                    "id": res.get("id"),
+                    "name": res.get("name"),
+                    "pricing_model": (acc or {}).get("pricing_model"),
+                    "has_http": bool((iface or {}).get("http")),
+                    "has_ws": bool((iface or {}).get("websocket")),
+                    "languages": (cov or {}).get("languages"),
+                    "sources": (cov or {}).get("sources"),
+                    "total_score": (data.get("evaluation") or {}).get("total_score"),
+                    "tags": (data.get("metadata") or {}).get("tags"),
+                })
+    out = {"count": len(items), "items": items}
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2)
+    log.info("registry.index.built", path=index_path, count=len(items))
+```
+
+```python
+# File: agents/sentiment_registrar/src/emitters/event_bus.py
+# Description:
+#   Redis Pub/Sub integration for A2A. Publishes updated events and subscribes for sweep triggers.
+#   Also optional HTTP webhook with HMAC signing for outbound events.
+
+import asyncio
+import hmac
+import hashlib
+import json
+from typing import Dict, Any, Callable, Awaitable
+
+import redis.asyncio as redis
+
+from ..config import settings
+from ..logging_utils import get_logger
+
+log = get_logger(__name__)
+
+REDIS_CH_UPDATED = "omega.research.sentiment.updated"
+REDIS_CH_SWEEP = "omega.research.sentiment.sweep"
+
+_redis = None
+
+def _get_redis():
+    global _redis
+    if _redis is None:
+        _redis = redis.from_url(settings.REDIS_URL)
+    return _redis
+
+async def publish_updated_event(resource_id: str, diff: Dict[str, Any]):
+    payload = {"resource_id": resource_id, "diff": diff}
+    r = _get_redis()
+    await r.publish(REDIS_CH_UPDATED, json.dumps(payload))
+    if settings.WEBHOOK_URL and settings.WEBHOOK_HMAC_SECRET:
+        await _send_webhook(payload)
+
+async def _send_webhook(payload: Dict[str, Any]):
+    import httpx
+    body = json.dumps(payload).encode("utf-8")
+    sig = hmac.new(settings.WEBHOOK_HMAC_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    headers = {"X-CSIR-Signature": f"sha256={sig}", "Content-Type": "application/json", "User-Agent": settings.random_user_agent()}
+    async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
+        try:
+            resp = await client.post(settings.WEBHOOK_URL, content=body)
+            log.info("webhook.sent", status=resp.status_code)
+        except Exception as e:
+            log.warning("webhook.error", error=str(e))
+
+async def start_redis_subscriber(run_sweep_callback: Callable[..., Awaitable[Dict[str, Any]]]):
+    r = _get_redis()
+    pubsub = r.pubsub()
+    await pubsub.subscribe(REDIS_CH_SWEEP)
+    log.info("redis.subscribed", channel=REDIS_CH_SWEEP, url=settings.REDIS_URL)
+    try:
+        async for msg in pubsub.listen():
+            if msg is None or msg.get("type") != "message":
+                continue
+            try:
+                data = json.loads(msg.get("data"))
+                mode = data.get("mode","incremental")
+                limit = int(data.get("limit",50))
+                force = bool(data.get("force", False))
+                log.info("redis.command", cmd="sweep", mode=mode, limit=limit, force=force)
+                await run_sweep_callback(mode=mode, limit=limit, force=force)
+            except Exception as e:
+                log.warning("redis.command.error", error=str(e))
+    except asyncio.CancelledError:
+        log.info("redis.subscriber.cancelled")
+```
+
+```python
+# File: agents/sentiment_registrar/src/mcp/tool_schemas.py
+# Description:
+#   Utility for building JSON Schemas for MCP tools based on POML endpoint params.
+
+from typing import Dict, Any, List
+
+def build_input_schema_from_params(required_params: List[Dict[str, Any]] = None, optional_params: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+    required_params = required_params or []
+    optional_params = optional_params or []
+    props = {}
+    required = []
+    for p in required_params:
+        name = p.get("name")
+        typ = p.get("type","string")
+        props[name] = {"type": _map_type(typ)}
+        if p.get("example") is not None:
+            props[name]["examples"] = [p["example"]]
+        required.append(name)
+    for p in optional_params:
+        name = p.get("name")
+        typ = p.get("type","string")
+        props[name] = {"type": _map_type(typ)}
+        if p.get("example") is not None:
+            props[name]["examples"] = [p["example"]]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": props,
+        "required": required
+    }
+
+def _map_type(t: str) -> str:
+    t = t.lower()
+    if t in ("int","integer","number"):
+        return "integer"
+    if t in ("float","double","decimal"):
+        return "number"
+    if t in ("bool","boolean"):
+        return "boolean"
+    return "string"
+```
+
+```python
+# File: agents/sentiment_registrar/src/mcp/tool_factory.py
+# Description:
+#   Converts POML endpoints into MCP tool descriptors and exports JSON files for discovery.
+
+import json
+import os
+from typing import Dict, Any, List
+import asyncio
+import httpx
+
+from ..config import settings
+from ..storage import ResourceStore
+from ..logging_utils import get_logger
+from .tool_schemas import build_input_schema_from_params
+
+log = get_logger(__name__)
+
+async def export_tools_for_resource(poml: Dict[str, Any], registry_dir: str):
+    res = poml.get("resource") or {}
+    rid = res.get("id")
+    iface = (poml.get("interfaces") or {}).get("http") or {}
+    endpoints: List[Dict[str, Any]] = iface.get("endpoints") or []
+    tools_dir = os.path.join(registry_dir, "mcp_tools")
+    os.makedirs(tools_dir, exist_ok=True)
+    all_tools = []
+    for ep in endpoints:
+        name = f"sentiment.{rid}.{ep.get('id')}"
+        desc = f"Call {rid} endpoint {ep.get('path')} ({ep.get('method')})"
+        schema = build_input_schema_from_params(ep.get("required_params"), ep.get("optional_params"))
+        tool = {
+            "name": name,
+            "description": desc,
+            "input_schema": schema,
+            "meta": {
+                "resource_id": rid,
+                "endpoint_id": ep.get("id"),
+                "base_url": iface.get("base_url"),
+                "method": ep.get("method"),
+                "path": ep.get("path"),
+                "rate_limit": ep.get("rate_limit"),
+            }
+        }
+        fn = os.path.join(tools_dir, f"{rid}_{ep.get('id')}.json")
+        with open(fn, "w", encoding="utf-8") as f:
+            json.dump(tool, f, indent=2)
+        all_tools.append(tool)
+    # index
+    with open(os.path.join(tools_dir, "index.json"), "w", encoding="utf-8") as f:
+        json.dump({"count": len(all_tools), "tools": [t["name"] for t in all_tools]}, f, indent=2)
+    log.info("mcp.exported", resource_id=rid, tools=len(all_tools))
+
+async def call_provider_endpoint(tool_meta: Dict[str, Any], params: Dict[str, Any], headers: Dict[str, str] = None) -> Dict[str, Any]:
+    headers = headers or {}
+    # Guardrails: concurrency and backoff are managed by caller; here implement local retry on 429
+    base_url = tool_meta.get("base_url")
+    path = tool_meta.get("path")
+    method = tool_meta.get("method","GET").upper()
+    url = base_url.rstrip("/") + path
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers={"User-Agent": settings.random_user_agent(), **headers}) as client:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                if method == "GET":
+                    resp = await client.get(url, params=params)
+                else:
+                    resp = await client.request(method, url, json=params)
+                if resp.status_code == 429 and attempt < 5:
+                    backoff = min(settings.RATE_BACKOFF_MAX_MS, settings.RATE_BACKOFF_BASE_MS * (2 ** (attempt-1)))
+                    await asyncio.sleep((backoff/1000.0) + __import__("random").random()*0.1)
+                    continue
+                data = resp.json() if "application/json" in resp.headers.get("content-type","") else {"raw": resp.text}
+                return {
+                    "resource_id": tool_meta.get("resource_id"),
+                    "endpoint_id": tool_meta.get("endpoint_id"),
+                    "request": params,
+                    "provider_response": data,
+                    "normalized": _normalize_response_guess(data),
+                    "meta": {
+                        "quota_rpm": (tool_meta.get("rate_limit") or {}).get("rpm"),
+                        "attribution_required": None,
+                        "license": None
+                    }
+                }
+            except Exception as e:
+                if attempt >= 3:
+                    raise
+                await asyncio.sleep(0.5)
+
+def _normalize_response_guess(data: Dict[str, Any]) -> Dict[str, Any]:
+    # Best-effort mapping to expected normalized keys if present
+    return {
+        "symbol": data.get("symbol") or data.get("ticker"),
+        "score": data.get("score") or data.get("sentiment") or data.get("value"),
+        "label": data.get("label") or data.get("state"),
+        "confidence": data.get("confidence") or data.get("prob"),
+        "ts": data.get("ts") or data.get("timestamp") or data.get("time")
+    }
+
+if __name__ == "__main__":
+    # CLI export all
+    import glob
+    import yaml
+    reg = settings.REGISTRY_DIR
+    pomls = glob.glob(os.path.join(reg, "sources", "*.poml"))
+    async def run():
+        for p in pomls:
+            with open(p, "r", encoding="utf-8") as f:
+                poml = yaml.safe_load(f)
+            await export_tools_for_resource(poml, registry_dir=reg)
+    asyncio.run(run())
+```
+
+```python
+# File: agents/sentiment_registrar/src/schemas/poml.resource.schema.json
+# Description:
+#   JSON Schema for POML validation. Derived from template; enforces required sections and basic types.
+
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "POML v1: Crypto Sentiment Data Resource",
+  "type": "object",
+  "required": ["version", "resource"],
+  "properties": {
+    "version": { "type": "string" },
+    "resource": {
+      "type": "object",
+      "required": ["id", "category"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "name": { "type": ["string","null"] },
+        "category": { "type": "string", "const": "sentiment" },
+        "subtypes": { "type": ["array","null"], "items": { "type": "string" } },
+        "homepage": { "type": ["string","null"] },
+        "docs_url": { "type": ["string","null"] },
+        "openapi_url": { "type": ["string","null"] },
+        "status_page": { "type": ["string","null"] },
+        "logo_url": { "type": ["string","null"] },
+        "description": { "type": ["string","null"] }
+      },
+      "additionalProperties": true
+    },
+    "access": { "type": ["object","null"] },
+    "coverage": { "type": ["object","null"] },
+    "data_model": { "type": ["object","null"] },
+    "interfaces": { "type": ["object","null"] },
+    "sdk": { "type": ["object","null"] },
+    "evaluation": {
+      "type": ["object","null"],
+      "properties": {
+        "last_checked": { "type": ["string","null"] },
+        "rubric_version": { "type": ["string","null"] },
+        "subscores": { "type": ["object","null"] },
+        "total_score": { "type": ["number","integer","null"] },
+        "notes": { "type": ["string","null"] }
+      }
+    },
+    "limits": { "type": ["object","null"] },
+    "compliance": { "type": ["object","null"] },
+    "support": { "type": ["object","null"] },
+    "metadata": {
+      "type": ["object","null"],
+      "properties": {
+        "tags": { "type": ["array","null"] },
+        "created_at": { "type": ["string","null"] },
+        "updated_at": { "type": ["string","null"] },
+        "version_semver": { "type": ["string","null"], "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
+```
+
+```python
+# File: agents/sentiment_registrar/src/tests/test_schema.py
+# Description:
+#   Unit tests for schema validation.
+
+import os
+import json
+import yaml
+from jsonschema import Draft202012Validator
+
+def load_schema():
+    here = os.path.dirname(__file__)
+    schema_path = os.path.abspath(os.path.join(here, "..", "schemas", "poml.resource.schema.json"))
+    with open(schema_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def test_valid_minimal():
+    schema = load_schema()
+    v = Draft202012Validator(schema)
+    poml = {
+        "version": "1.0.0",
+        "resource": {
+            "id": "example",
+            "category": "sentiment"
+        }
+    }
+    errs = list(v.iter_errors(poml))
+    assert len(errs) == 0
+
+def test_invalid_missing_id():
+    schema = load_schema()
+    v = Draft202012Validator(schema)
+    poml = {
+        "version": "1.0.0",
+        "resource": {
+            "category": "sentiment"
+        }
+    }
+    errs = list(v.iter_errors(poml))
+    assert any("is a required property" in e.message for e in errs)
+```
+
+```python
+# File: agents/sentiment_registrar/src/tests/test_scoring.py
+# Description:
+#   Unit tests for scoring determinism and ranges.
+
+from agents.sentiment_registrar.src.evaluation.scoring import score_resource
+
+def test_scoring_deterministic():
+    poml = {
+        "resource": {"id":"x","category":"sentiment","docs_url":"https://x"},
+        "coverage": {"assets":{"universe_size":2500},"sources":["twitter","reddit","news"],"languages":["en","es","pt"]},
+        "data_model": {"update_frequency":"realtime","latency_ms_p50":200,"fields":[{"name":"score"},{"name":"label"},{"name":"confidence"}],
+                       "aggregation":{"methods":["ema","zscore"]},
+                       "scale":{"name":"vader"}},
+        "interfaces": {"http":{"endpoints":[{"id":"get","method":"GET","path":"/"}]}},
+        "support": {"sla":"99.9%"},
+        "resource":{"id":"x","category":"sentiment","status_page":"https://status.x"}
+    }
+    a = score_resource(poml)
+    b = score_resource(poml)
+    assert a["total_score"] == b["total_score"]
+    assert 0 <= a["total_score"] <= 100
+```
+
+```python
+# File: agents/sentiment_registrar/src/tests/test_validators.py
+# Description:
+#   Unit tests for validator lints.
+
+import pytest
+from agents.sentiment_registrar.src.evaluation.validators import Validator
+
+def test_contradiction_redistribution():
+    v = Validator()
+    bad = {
+        "version":"1.0.0",
+        "resource":{"id":"x","category":"sentiment"},
+        "access":{"terms":{"redistribution_allowed":True,"data_licensing":"proprietary"}}
+    }
+    with pytest.raises(Exception):
+        v.validate_poml(bad)
+```
+
+```python
+# File: agents/sentiment_registrar/Makefile
+# Description:
+#   Makefile targets for setup, testing, sweep, registry build, serve, and MCP export.
+
+VENV?=.venv
+PY?=$(VENV)/bin/python
+PIP?=$(VENV)/bin/pip
+
+.PHONY: setup test sweep build-registry serve mcp-export
+
+setup:
+	python3 -m venv $(VENV)
+	$(PIP) install --upgrade pip
+	$(PIP) install fastapi uvicorn httpx pydantic python-dotenv PyYAML jsonschema redis pytest
+
+test:
+	$(PY) -m pytest -q agents/sentiment_registrar/src/tests
+
+sweep:
+	$(PY) -c "from agents.sentiment_registrar.src.agent import run_sweep; import asyncio; asyncio.run(run_sweep())"
+
+build-registry:
+	$(PY) -c "import asyncio; from agents.sentiment_registrar.src.emitters.registry_index import build_registry_index; from agents.sentiment_registrar.src.config import settings; asyncio.run(build_registry_index(settings.REGISTRY_DIR))"
+
+serve:
+	$(PY) -m agents.sentiment_registrar.src.app
+
+mcp-export:
+	$(PY) -m agents.sentiment_registrar.src.mcp.tool_factory
+```
+
+```python
+# File: agents/sentiment_registrar/README.md
+# Description:
+#   Project README with usage instructions.
+
+# Crypto Sentiment Intel Registrar (CSIR)
+
+Requirements:
+- Python 3.11+
+- Redis (for Pub/Sub)
+- Optional: Make
+
+Setup:
+- make setup
+
+Run tests:
+- make test
+
+Run a sweep (incremental):
+- make sweep
+
+Serve API (FastAPI on :8080):
+- make serve
+
+Trigger sweep via HTTP:
+- POST http://localhost:8080/research/sentiment/sweep
+  body: { "mode": "incremental", "limit": 50, "force": false }
+
+Get resource by id:
+- GET http://localhost:8080/resource/<id>
+
+Build registry index:
+- make build-registry
+
+Export MCP tools:
+- make mcp-export
+
+Redis Pub/Sub:
+- Publish {"mode":"incremental","limit":50} to channel omega.research.sentiment.sweep
+- Updates are published to omega.research.sentiment.updated
+```
+
+```python
+# File: agents/sentiment_registrar/.env.example
+# Description:
+#   Sample configuration for local development.
+
+REGISTRY_DIR=registry
+SQLITE_PATH=registry/csir.db
+REDIS_URL=redis://localhost:6379/0
+WEBHOOK_URL=
+WEBHOOK_HMAC_SECRET=
+ALLOWLIST_DOMAINS=lunarcrush.com,alternative.me,santiment.net,thetie.io,rapidapi.com,github.com,kaggle.com,cryptopanic.com,finnhub.io,newsapi.org
+REQUEST_TIMEOUT_S=8.0
+MAX_CONCURRENCY=6
+RATE_BACKOFF_BASE_MS=250
+RATE_BACKOFF_MAX_MS=16000
+W_COVERAGE=25
+W_FRESHNESS=15
+W_QUALITY=20
+W_ACCESS=10
+W_COMPLIANCE=10
+W_INTEGRABILITY=10
+W_STABILITY=10
+```
+
+```python
+# File: agents/sentiment_registrar/__init__.py
+# Description:
+#   Package marker.
+```
+
+```python
+# File: agents/sentiment_registrar/src/__init__.py
+# Description:
+#   Package marker for src.
+```
+
+```python
+# File: agents/sentiment_registrar/src/discovery/__init__.py
+# Description:
+#   Package marker for discovery.
+```
+
+```python
+# File: agents/sentiment_registrar/src/evaluation/__init__.py
+# Description:
+#   Package marker for evaluation.
+```
+
+```python
+# File: agents/sentiment_registrar/src/emitters/__init__.py
+# Description:
+#   Package marker for emitters.
+```
+
+```python
+# File: agents/sentiment_registrar/src/mcp/__init__.py
+# Description:
+#   Package marker for mcp.
+```
+
+```python
+# File: agents/sentiment_registrar/src/tests/__init__.py
+# Description:
+#   Package marker for tests.
+```
+
+# Notes:
+# - This implementation provides the core loop, validation, scoring, POML emission, registry indexing, MCP export, and A2A/HTTP interfaces.
+# - Security: HMAC on outbound webhooks; domain allowlist enforced; robots respected; user-agent rotation.
+# - Observability: JSON structured logs with basic trace IDs; rate-limit backoff is implemented in MCP caller.
+# - To integrate with FastMCP runtime, the exported MCP tool JSON files can be consumed by a compatible MCP host.
+# - For smoke testing provider calls, add endpoints into POML under interfaces.http.endpoints; the MCP caller will attempt requests accordingly.
+```

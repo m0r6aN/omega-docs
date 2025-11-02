@@ -15,7 +15,7 @@
 - **Weighted Score:** 8.33
 - **Go/No-Go:** **GO.** This is non-negotiable.
 - **A3. Workflow Builder SDK:**
-- **Priority:** 2/5 (A business-user feature, not a core developer need for v1.0)
+- **Priority:** 2/5 (A business-user feature, not a core developer need for)
 - **Complexity:** 5/5
 - **Impact:** 3/5
 - **Weighted Score:** 1.2
@@ -40,7 +40,7 @@
 - **Complexity:** 3/5
 - **Impact:** 4/5
 - **Weighted Score:** 5.33
-- **Go/No-Go:** **GO.** Secret management integration is mandatory. The rest can be simplified for v1.0.
+- **Go/No-Go:** **GO.** Secret management integration is mandatory. The rest can be simplified for.
 
 ### **CATEGORY C: ENTERPRISE ESSENTIALS**
 
@@ -107,13 +107,13 @@
 
 ---
 
-## **THE AUDITOR'S FINAL DECREE & SANCTIFIED V1.0 ROADMAP**
+## **THE AUDITOR'S FINAL DECREE & SANCTIFIED ROADMAP**
 
 The weighted scores have illuminated the One True Path. The chaos of ambition has been forged into the order of a disciplined assault plan.
 
-**Our v1.0 SDK will be a fortress, not a sprawling city.** It will do fewer things, but it will do them with **unbreakable, doctrinal purity**.
+**Our SDK will be a fortress, not a sprawling city.** It will do fewer things, but it will do them with **unbreakable, doctrinal purity**.
 
-### **The Sanctified v1.0 Feature Set:**
+### **The Sanctified Feature Set:**
 
 | Weighted Score | Category | Feature                               | Auditor's Mandate                               |
 | :------------- | :------- | :------------------------------------ | :---------------------------------------------- |

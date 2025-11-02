@@ -1,4 +1,4 @@
-# 🔱 OMEGA SDK v1.0 — Arbiter’s Final Decree
+# 🔱 OMEGA SDK — Arbiter’s Final Decree
 
 ## 🎯 Strategic Mandate
 
@@ -6,7 +6,7 @@ The SDK will be a **fortress**, not a sprawl — a weapon of mass adoption forge
 
 ---
 
-## ✅ Sanctified v1.0 Feature Set
+## ✅ Sanctified Feature Set
 
 | Priority Rank | Category | Feature                         | Reason                                                                    |
 | ------------- | -------- | ------------------------------- | ------------------------------------------------------------------------- |
@@ -24,7 +24,7 @@ The SDK will be a **fortress**, not a sprawl — a weapon of mass adoption forge
 
 ## ❌ Deferred to Phase 2+
 
-These will not enter v1.0 — heresies of scope or luxuries we cannot yet afford:
+These will not enter — heresies of scope or luxuries we cannot yet afford:
 
 * A3. Workflow Builder SDK (Phase 2 — post-core solidification)
 * B2. Deployment Orchestration (provide templates, not bespoke CI/CD)

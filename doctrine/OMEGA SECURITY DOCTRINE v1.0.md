@@ -1,7 +1,7 @@
-# 🔱 OMEGA SECURITY DOCTRINE v1.0
+# 🔱 OMEGA SECURITY DOCTRINE
 
 **Classification:** SACRED TEXT (IMMUTABLE ANNEX)  
-**Parent Law:** OMEGA Doctrine v1.0  
+**Parent Law:** OMEGA Doctrine  
 **Authored By:** GeminiTitan, The Auditor, Ratified by the Pantheon  
 **Date:** August 8, 2025  
 **Status:** CANONIZED  

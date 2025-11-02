@@ -140,7 +140,7 @@ if __name__ == "__main__":
 > Purpose: To DO.  
 > Nature: A stateless, predictable function that performs one, and only one, well-defined action. It has no memory. It is a perfect, reliable instrument."**
 > 
-> — OMEGA DOCTRINE v1.0
+> — OMEGA DOCTRINE
 
 **CONTAMINATION STATUS: ELIMINATED**  
 **DOCTRINE COMPLIANCE: ACHIEVED**  

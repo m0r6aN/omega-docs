@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(for:*)",
+      "Bash(do echo \"=== $dir ===\")",
+      "Bash(ls:*)",
+      "Bash(done)",
+      "Bash(do base=\"$file%.md\")",
+      "Bash(if [ -f \"$base.txt\" ])",
+      "Bash(then echo \"DUPLICATE: $base (.md and .txt)\")",
+      "Bash(fi)",
+      "Bash(then echo \"DUPLICATE: doctrine/$base (.md and .txt)\")",
+      "Bash(grep:*)",
+      "Bash(xargs:*)",
+      "Bash(npx create-docusaurus:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tailwindcss init:*)",
+      "Bash(npm run build:*)",
+      "Bash(find:*)",
+      "Bash(curl:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

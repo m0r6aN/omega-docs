@@ -40,6 +40,26 @@ docker ps --format "table {{.Names}}\t{{.Ports}}\t{{.Status}}"
 
 ## 4. Post-Deployment Verification
 
+### Gateway-first Verification (Recommended)
+
+Use the local nginx gateway to mirror Azure ingress and verify portless identities.
+
+```powershell
+# Agent Registry health via gateway
+curl -sf http://localhost:8080/api/core/agent_registry/health
+
+# Titans health via gateway (examples)
+curl -sf http://localhost:8080/api/titans/claude/health
+curl -sf http://localhost:8080/api/titans/gemini/health
+```
+
+Logs should show Titans registering with host values like `http://gateway/api/titans/...` and sending heartbeats successfully.
+
+---
+
+### Direct container ports (legacy/local)
+
+
 Execute these commands to verify the health and status of the core services. All checks should pass without error.
 
 ### Federation Core

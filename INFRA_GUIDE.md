@@ -1,12 +1,22 @@
 # Infrastructure Guide (v1.0.0)
 
-## Service Endpoints
+## Service Endpoints and Identity
 
-These are provided via env (Docker service DNS inside the network):
+Prefer base URLs for derived endpoints and stable, portless identities. Explicit URLs remain supported as fallback.
 
-- Federation: `FEDERATION_CORE_URL`, WS: `FEDERATION_WS_URL` :contentReference[oaicite:13]{index=13}  
-- Registries: `AGENT_REGISTRY_URL`, `AGENT_HEARTBEAT_URL`, MCP registry + heartbeat :contentReference[oaicite:14]{index=14}  
-- Context Server: `CONTEXT_SERVER_URL` (no inline literals in code) :contentReference[oaicite:15]{index=15}  
+- Federation: `FEDERATION_CORE_URL`, WS: `FEDERATION_WS_URL`
+- Registries (preferred): `AGENT_REGISTRY_BASE` → derives
+  - Register: `{AGENT_REGISTRY_BASE}/register/agent`
+  - Heartbeat: `{AGENT_REGISTRY_BASE}/heartbeat/agent`
+  - Fallbacks: `AGENT_REGISTRY_URL`, `AGENT_HEARTBEAT_URL`
+- Context Server: `CONTEXT_SERVER_URL` (no inline literals in code)
+- Public Identity (no ports):
+  - Titans: `TITAN_PUBLIC_BASE` (preferred) or `AGENT_PUBLIC_BASE`
+  - Agents: `AGENT_PUBLIC_BASE` (preferred) or `AGENT_HOST` (fallback)
+- Local Gateway (dev):
+  - Internal DNS: `http://gateway/`
+  - External: `http://localhost:8080/`
+  - Paths: `/api/core/agent_registry`, `/api/titans/{titan}`
 
 ## Observability
 

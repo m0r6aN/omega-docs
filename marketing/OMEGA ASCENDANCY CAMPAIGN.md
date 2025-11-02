@@ -136,7 +136,7 @@ Here comes the **Tactical Execution Orders** — the *operational battle map* th
 
 ---
 
-## **Tactical Execution Orders — Operational Playbook v1.0**
+## **Tactical Execution Orders — Operational Playbook**
 
 ## 🎯 **Mission Control: Orchestrator Agent**
 

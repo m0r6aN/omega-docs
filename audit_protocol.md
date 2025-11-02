@@ -1,4 +1,4 @@
-# OMEGA Audit Protocol v1.0
+# OMEGA Audit Protocol
 
 ## **THE FIRST ACT OF THE AUDITOR: THE IMMUTABLE CHRONICLE**
 

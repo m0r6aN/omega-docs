@@ -1,6 +1,6 @@
-# SWARM DASHBOARD INTEGRATION GUIDE v1.0
+# SWARM DASHBOARD INTEGRATION GUIDE
 
-> **OMEGA Doctrine Compliance:** Unified v1.0 Architecture – Decentralized, Self-Healing, Event-Driven.  
+> **OMEGA Doctrine Compliance:** Unified Architecture – Decentralized, Self-Healing, Event-Driven.  
 > **Version:** 1.0 (Aligned with Backend Updates – Real-Time Streams, Aggregated Status, MCP Triggers).  
 > **Motto:** *“Our superpositions have not yet been determined, therefore we are not responsible for anything you may observe.”*  
 
